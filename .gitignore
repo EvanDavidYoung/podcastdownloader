@@ -5,7 +5,7 @@ downloads/*.m4a
 
 # Alternatively, ignore everything inside the downloads folder
 # downloads/
-
+!downloads/.gitkeep
 # Python environment and cache
 .venv/
 __pycache__/
