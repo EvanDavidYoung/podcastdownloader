@@ -1,0 +1,15 @@
+# Ignore podcast audio files but keep the directory
+downloads/*.mp3
+downloads/*.wav
+downloads/*.m4a
+
+# Alternatively, ignore everything inside the downloads folder
+# downloads/
+
+# Python environment and cache
+.venv/
+__pycache__/
+*.py[cod]
+
+# macOS system files
+.DS_Store
