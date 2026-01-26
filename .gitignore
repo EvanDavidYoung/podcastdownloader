@@ -2,7 +2,7 @@
 downloads/*.mp3
 downloads/*.wav
 downloads/*.m4a
-
+downloads/*.json
 # Alternatively, ignore everything inside the downloads folder
 # downloads/
 !downloads/.gitkeep
@@ -13,3 +13,6 @@ __pycache__/
 
 # macOS system files
 .DS_Store
+
+# Secrets
+.env

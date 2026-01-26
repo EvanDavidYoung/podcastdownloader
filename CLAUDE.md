@@ -33,6 +33,27 @@ python downloadtranscript.py
 - `data/` - Contains WhisperX environment for transcription, database, and transcripts
 - `Docs/` - Project planning documentation
 
+## Secrets
+
+Secrets are stored in `.env` (gitignored). To set up:
+
+```bash
+# Copy the example file
+cp .env.example .env
+
+# Edit .env and add your token
+```
+
+To run a command with your token loaded:
+
+```bash
+# Option 1: Load .env and run
+export $(cat .env | xargs) && python downloadtranscript.py
+
+# Option 2: Use python-dotenv (if installed)
+# The script can load .env automatically with: from dotenv import load_dotenv; load_dotenv()
+```
+
 ## Dependencies
 
 Core packages: `feedparser`, `requests`
