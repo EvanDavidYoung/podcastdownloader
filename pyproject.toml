@@ -1,0 +1,26 @@
+[project]
+name = "podcast-downloader"
+version = "0.1.0"
+description = "Download podcasts and generate word-synced transcripts"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["scripts"]
+omit = [
+    "scripts/transcribe_modal.py",  # Modal functions require cloud environment
+    "scripts/app.py",  # FastAPI app requires Modal
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
+show_missing = true

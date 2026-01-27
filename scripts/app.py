@@ -26,6 +26,7 @@ from pathlib import Path
 web_image = modal.Image.debian_slim(python_version="3.11").pip_install(
     "fastapi[standard]",
     "pydantic",
+    "numpy",
 )
 
 app = modal.App("podcast-web")
@@ -39,14 +40,29 @@ if frontend_dist.exists():
 # FastAPI Application
 # ---------------------
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import time
+import os
 
 web_app = FastAPI(title="Podcast Transcriber API")
+
+
+# ---------------------
+# Authentication
+# ---------------------
+
+def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")):
+    """Verify the API key from the X-API-Key header."""
+    expected_key = os.environ.get("API_KEY")
+    if not expected_key:
+        raise HTTPException(status_code=500, detail="API_KEY not configured")
+    if x_api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return x_api_key
 
 # Allow CORS for local development
 web_app.add_middleware(
@@ -119,7 +135,7 @@ async def health_check():
 
 
 @web_app.post("/api/transcribe/url", response_model=JobResponse)
-async def transcribe_from_url(req: TranscribeURLRequest):
+async def transcribe_from_url(req: TranscribeURLRequest, api_key: str = Depends(verify_api_key)):
     """
     Start transcription from a direct audio URL.
 
@@ -128,7 +144,7 @@ async def transcribe_from_url(req: TranscribeURLRequest):
     cleanup_old_jobs()
 
     # Look up the deployed transcription function
-    transcribe_fn = modal.Function.lookup("podcast-transcriber", "transcribe_from_url")
+    transcribe_fn = modal.Function.from_name("podcast-transcriber", "transcribe_from_url")
 
     # Spawn async job
     call = transcribe_fn.spawn(
@@ -151,7 +167,7 @@ async def transcribe_from_url(req: TranscribeURLRequest):
 
 
 @web_app.post("/api/transcribe/rss", response_model=JobResponse)
-async def transcribe_from_rss(req: TranscribeRSSRequest):
+async def transcribe_from_rss(req: TranscribeRSSRequest, api_key: str = Depends(verify_api_key)):
     """
     Start transcription from an RSS feed (latest or specified episode).
 
@@ -160,7 +176,7 @@ async def transcribe_from_rss(req: TranscribeRSSRequest):
     cleanup_old_jobs()
 
     # Look up the deployed transcription function
-    transcribe_fn = modal.Function.lookup("podcast-transcriber", "transcribe_from_rss")
+    transcribe_fn = modal.Function.from_name("podcast-transcriber", "transcribe_from_rss")
 
     # Spawn async job
     call = transcribe_fn.spawn(
@@ -184,7 +200,7 @@ async def transcribe_from_rss(req: TranscribeRSSRequest):
 
 
 @web_app.get("/api/status/{job_id}", response_model=StatusResponse)
-async def get_job_status(job_id: str):
+async def get_job_status(job_id: str, api_key: str = Depends(verify_api_key)):
     """
     Poll the status of a transcription job.
 
@@ -224,7 +240,7 @@ async def get_job_status(job_id: str):
 
 
 @web_app.get("/api/jobs")
-async def list_jobs():
+async def list_jobs(api_key: str = Depends(verify_api_key)):
     """List all active jobs (for debugging)."""
     cleanup_old_jobs()
     return {
@@ -248,9 +264,10 @@ async def list_jobs():
 
 @app.function(
     image=web_image,
-    allow_concurrent_inputs=100,
-    container_idle_timeout=300,  # Keep warm for 5 minutes
+    scaledown_window=300,
+    secrets=[modal.Secret.from_name("api-auth")],
 )
+@modal.concurrent(max_inputs=100)
 @modal.asgi_app()
 def serve():
     """

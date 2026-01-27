@@ -11,6 +11,11 @@ downloads/*.json
 __pycache__/
 *.py[cod]
 
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
 # macOS system files
 .DS_Store
 

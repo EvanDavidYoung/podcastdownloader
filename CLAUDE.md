@@ -107,11 +107,34 @@ Output files are saved in `downloads/` alongside the audio:
 - `.txt` - Plain text
 - `.tsv` - Tab-separated values
 
+## Testing
+
+```bash
+# Install test dependencies
+pip install -r requirements-dev.txt
+
+# Run all tests
+pytest
+
+# Run with coverage report
+pytest --cov=scripts --cov-report=html
+
+# Run specific test file
+pytest tests/test_merge_chinese_words.py
+
+# Run tests matching a pattern
+pytest -k "test_merge"
+```
+
+Coverage reports are generated in `htmlcov/`. Open `htmlcov/index.html` in a browser to view.
+
 ## Dependencies
 
 **Miniforge base environment:**
 - `modal` - Cloud GPU transcription and web deployment
 - `numpy` - Required for Modal result deserialization
+- `fastapi`, `pydantic` - Web API dependencies
+- `pytest`, `pytest-cov` - Testing (install via `requirements-dev.txt`)
 
 **Whisperx conda environment (`conda activate whisperx`):**
 - WhisperX and PyTorch for local transcription
