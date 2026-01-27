@@ -13,6 +13,7 @@ from merge_chinese_words import (
     is_punctuation,
     merge_words_in_segment,
     process_transcript,
+    preview_merge,
 )
 
 
@@ -154,3 +155,41 @@ class TestProcessTranscript:
         # word_segments should also be merged
         word_segments = result["word_segments"]
         assert len(word_segments) == 2  # "大家" + "好"
+
+
+class TestPreviewMerge:
+    """Tests for preview_merge function."""
+
+    def test_preview_outputs_comparison(self, sample_transcript_file, capsys):
+        """Test that preview shows original and merged words."""
+        preview_merge(sample_transcript_file)
+
+        captured = capsys.readouterr()
+        # Should show both original and merged
+        assert "ORIGINAL" in captured.out
+        assert "MERGED" in captured.out
+        # Should show character-level in original
+        assert "大" in captured.out
+        # Should show word-level in merged
+        assert "大家" in captured.out
+
+    def test_preview_empty_segments(self, tmp_path, capsys):
+        """Test preview with no segments."""
+        empty_transcript = {"segments": [], "language": "zh"}
+        file_path = tmp_path / "empty.json"
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(empty_transcript, f)
+
+        preview_merge(file_path)
+
+        captured = capsys.readouterr()
+        assert "No segments found" in captured.out
+
+    def test_preview_shows_token_count(self, sample_transcript_file, capsys):
+        """Test that preview shows token count reduction."""
+        preview_merge(sample_transcript_file)
+
+        captured = capsys.readouterr()
+        # Should show token count like "Original: X tokens → Merged: Y tokens"
+        assert "tokens" in captured.out
+        assert "→" in captured.out

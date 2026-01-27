@@ -109,14 +109,22 @@ Output files are saved in `downloads/` alongside the audio:
 
 ## Testing
 
+**Tests must be run in the whisperx conda environment** (requires jieba, opencc, and other dependencies).
+
 ```bash
-# Install test dependencies
+# Activate the whisperx environment first
+conda activate whisperx
+
+# Install test dependencies (one-time)
 pip install -r requirements-dev.txt
 
 # Run all tests
 pytest
 
 # Run with coverage report
+pytest --cov=scripts --cov-report=term-missing
+
+# Generate HTML coverage report
 pytest --cov=scripts --cov-report=html
 
 # Run specific test file

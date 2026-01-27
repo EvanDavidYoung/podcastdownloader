@@ -8,7 +8,7 @@ from pathlib import Path
 # Add scripts to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from convert_to_traditional import convert_transcript
+from convert_to_traditional import convert_transcript, preview_conversion
 
 
 class TestConvertTranscript:
@@ -146,3 +146,39 @@ class TestConvertWordSegments:
 
         assert result["word_segments"][0]["word"] == "這個"
         assert result["word_segments"][1]["word"] == "節目"
+
+
+class TestPreviewConversion:
+    """Tests for preview_conversion function."""
+
+    def test_preview_shows_original_and_converted(self, simplified_transcript_file, capsys):
+        """Test that preview shows both original and converted text."""
+        preview_conversion(simplified_transcript_file)
+
+        captured = capsys.readouterr()
+        assert "ORIGINAL" in captured.out
+        assert "CONVERTED" in captured.out
+        # Original should have simplified
+        assert "这" in captured.out or "這" in captured.out
+        # Converted should have traditional
+        assert "這" in captured.out
+
+    def test_preview_empty_segments(self, tmp_path, capsys):
+        """Test preview with no segments."""
+        empty_transcript = {"segments": [], "language": "zh"}
+        file_path = tmp_path / "empty.json"
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(empty_transcript, f)
+
+        preview_conversion(file_path)
+
+        captured = capsys.readouterr()
+        assert "No segments found" in captured.out
+
+    def test_preview_with_taiwan_config(self, simplified_transcript_file, capsys):
+        """Test preview with Taiwan conversion config."""
+        preview_conversion(simplified_transcript_file, config="s2tw")
+
+        captured = capsys.readouterr()
+        # Should still work and show traditional characters
+        assert "CONVERTED" in captured.out
