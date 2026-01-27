@@ -2,21 +2,26 @@
 Modal app for podcast transcription with WhisperX on GPU.
 
 Usage:
-    # Install modal
-    pip install modal
+    # Install modal and numpy
+    pip install modal numpy
 
     # Authenticate (first time only)
     modal setup
 
     # Run transcription on a URL
-    modal run modal_app.py --audio-url "https://example.com/podcast.mp3"
+    modal run scripts/transcribe_modal.py --audio-url "https://example.com/podcast.mp3"
 
     # Run on a local file (uploads to Modal)
-    modal run modal_app.py --audio-path "./downloads/episode.mp3"
+    modal run scripts/transcribe_modal.py --audio-path "./downloads/episode.mp3"
 
     # Deploy as a web endpoint
-    modal deploy modal_app.py
+    modal deploy scripts/transcribe_modal.py
 """
+
+try:
+    import numpy  # noqa: F401 - Required locally to deserialize Modal results
+except ImportError:
+    raise ImportError("numpy is required locally to deserialize Modal results. Install with: pip install numpy")
 
 import modal
 
@@ -27,11 +32,14 @@ image = (
     .pip_install(
         "torch",
         "torchaudio",
+        "omegaconf",
+        "huggingface_hub<0.25.0",  # Pin to avoid use_auth_token deprecation error
         "whisperx @ git+https://github.com/m-bain/whisperx.git",
         "feedparser",
         "requests",
         "jieba",
         "opencc-python-reimplemented",
+        "fastapi[standard]",
     )
 )
 
@@ -39,12 +47,14 @@ app = modal.App("podcast-transcriber", image=image)
 
 # Create a volume to cache models (saves download time on subsequent runs)
 model_cache = modal.Volume.from_name("whisperx-models", create_if_missing=True)
+MODEL_CACHE_PATH = "/cache/models"
 
 
 @app.function(
     gpu="T4",  # Options: "T4", "A10G", "A100", "H100"
     timeout=1800,  # 30 minutes max
-    volumes={"/root/.cache": model_cache},
+    volumes={MODEL_CACHE_PATH: model_cache},
+    secrets=[modal.Secret.from_name("huggingface", required_keys=["HF_TOKEN"])],
 )
 def transcribe_audio(
     audio_bytes: bytes,
@@ -70,8 +80,25 @@ def transcribe_audio(
     """
     import tempfile
     import os
-    import whisperx
     import torch
+
+    # Workaround for PyTorch 2.6+ weights_only issue with pyannote/omegaconf
+    # Monkey-patch torch.load to force weights_only=False for pyannote models
+    _original_torch_load = torch.load
+    def _patched_torch_load(*args, **kwargs):
+        kwargs['weights_only'] = False
+        return _original_torch_load(*args, **kwargs)
+    torch.load = _patched_torch_load
+
+    import whisperx
+
+    # Use mounted volume for model cache
+    os.environ["HF_HOME"] = MODEL_CACHE_PATH
+    os.environ["TORCH_HOME"] = MODEL_CACHE_PATH
+
+    # Use HF_TOKEN from Modal secret if not passed directly
+    if hf_token is None:
+        hf_token = os.environ.get("HF_TOKEN")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     compute_type = "float16" if device == "cuda" else "int8"
@@ -100,9 +127,10 @@ def transcribe_audio(
         # Optional: Speaker diarization
         if hf_token:
             print("Running speaker diarization...")
-            diarize_model = whisperx.DiarizationPipeline(use_auth_token=hf_token, device=device)
+            from whisperx.diarize import DiarizationPipeline, assign_word_speakers
+            diarize_model = DiarizationPipeline(use_auth_token=hf_token, device=device)
             diarize_segments = diarize_model(audio)
-            result = whisperx.assign_word_speakers(diarize_segments, result)
+            result = assign_word_speakers(diarize_segments, result)
 
         transcript = {
             "segments": result["segments"],
@@ -197,12 +225,18 @@ def convert_to_traditional(data: dict, config: str = 's2t') -> dict:
     return data
 
 
-@app.function(gpu="T4", timeout=1800, volumes={"/root/.cache": model_cache})
+@app.function(
+    gpu="T4",
+    timeout=1800,
+    volumes={MODEL_CACHE_PATH: model_cache},
+    secrets=[modal.Secret.from_name("huggingface", required_keys=["HF_TOKEN"])],
+)
 def transcribe_from_url(
     url: str,
     language: str = "zh",
     merge_words: bool = True,
     to_traditional: bool = False,
+    hf_token: str = None,
 ) -> dict:
     """Download and transcribe audio from a URL."""
     import requests
@@ -219,16 +253,23 @@ def transcribe_from_url(
         language=language,
         merge_words=merge_words,
         to_traditional=to_traditional,
+        hf_token=hf_token,
     )
 
 
-@app.function(gpu="T4", timeout=1800, volumes={"/root/.cache": model_cache})
+@app.function(
+    gpu="T4",
+    timeout=1800,
+    volumes={MODEL_CACHE_PATH: model_cache},
+    secrets=[modal.Secret.from_name("huggingface", required_keys=["HF_TOKEN"])],
+)
 def transcribe_from_rss(
     rss_url: str,
     episode_index: int = 0,
     language: str = "zh",
     merge_words: bool = True,
     to_traditional: bool = False,
+    hf_token: str = None,
 ) -> dict:
     """Download and transcribe the latest (or specified) episode from an RSS feed."""
     import feedparser
@@ -270,6 +311,7 @@ def transcribe_from_rss(
         language=language,
         merge_words=merge_words,
         to_traditional=to_traditional,
+        hf_token=hf_token,
     )
 
     result["episode_title"] = title
@@ -277,8 +319,13 @@ def transcribe_from_rss(
 
 
 # Web endpoint for API access
-@app.function(gpu="T4", timeout=1800, volumes={"/root/.cache": model_cache})
-@modal.web_endpoint(method="POST")
+@app.function(
+    gpu="T4",
+    timeout=1800,
+    volumes={MODEL_CACHE_PATH: model_cache},
+    secrets=[modal.Secret.from_name("huggingface", required_keys=["HF_TOKEN"])],
+)
+@modal.fastapi_endpoint(method="POST")
 def transcribe_endpoint(request: dict) -> dict:
     """
     Web endpoint for transcription.
@@ -318,6 +365,7 @@ def main(
     language: str = "zh",
     merge_words: bool = True,
     to_traditional: bool = False,
+    hf_token: str = None,
     output: str = None,
 ):
     """CLI entrypoint for running transcription."""
@@ -329,6 +377,7 @@ def main(
             language=language,
             merge_words=merge_words,
             to_traditional=to_traditional,
+            hf_token=hf_token,
         )
     elif audio_url:
         result = transcribe_from_url.remote(
@@ -336,6 +385,7 @@ def main(
             language=language,
             merge_words=merge_words,
             to_traditional=to_traditional,
+            hf_token=hf_token,
         )
     elif audio_path:
         with open(audio_path, "rb") as f:
@@ -346,6 +396,7 @@ def main(
             language=language,
             merge_words=merge_words,
             to_traditional=to_traditional,
+            hf_token=hf_token,
         )
     else:
         print("Please provide --audio-url, --audio-path, or --rss-url")

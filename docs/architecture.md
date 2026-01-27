@@ -32,6 +32,8 @@ All CLI scripts are located in the `scripts/` directory.
 | `transcribe_local.py` | Batch transcribe audio files locally using WhisperX (CPU) |
 | `transcribe_modal.py` | Cloud transcription via Modal GPU (no local GPU required) |
 
+See [modal-setup.md](modal-setup.md) for detailed Modal configuration, including HuggingFace token setup for speaker diarization.
+
 ### Post-Processing
 
 | Script | Description |
@@ -88,7 +90,7 @@ Transcription generates multiple output formats in `downloads/`:
 ### Backend
 - Download podcasts from arbitrary URLs
 - Generate transcripts with metadata as JSON
-- Add speaker diarization
+- ~~Add speaker diarization~~ (implemented in Modal)
 - Input/output directory polling for batch processing
 
 ### Frontend
