@@ -5,14 +5,14 @@ Download podcasts and generate word-synced transcripts for Chinese audio.
 ## Quick Start
 
 ```bash
-# Install uv (fast Python package manager)
-curl -LsSf https://astral.sh/uv/install.sh | sh
+# Install Miniforge (if not already installed)
+brew install miniforge
+conda init "$(basename "$SHELL")"
+# Restart terminal
 
-# Create and activate virtual environment
-uv venv && source .venv/bin/activate
-
-# Install dependencies
-uv pip install -r requirements.txt
+# Install Modal for cloud transcription
+pip install modal numpy
+modal setup
 ```
 
 See [docs/getting-started.md](docs/getting-started.md) for full installation instructions.
@@ -115,14 +115,11 @@ Features:
 ## Typical Workflow
 
 ```bash
-source .venv/bin/activate
-
 # 1. Download podcast episode
 python scripts/download_podcast.py
 
-# 2. Transcribe with WhisperX (local)
-conda activate whisperx
-python scripts/transcribe_local.py
+# 2. Transcribe via Modal (cloud GPU)
+modal run scripts/transcribe_modal.py --audio-path "downloads/episode.mp3"
 
 # 3. Merge characters into words
 python scripts/merge_chinese_words.py downloads/episode.json
@@ -135,18 +132,11 @@ open web/transcript-player.html
 # Drop the MP3 and merged JSON file
 ```
 
-Or use cloud transcription (Modal) for GPU acceleration without local setup.
+Or use local transcription with `conda activate whisperx && python scripts/transcribe_local.py`.
 
 ## Documentation
 
 - [Getting Started](docs/getting-started.md) - Installation and setup
 - [Architecture](docs/architecture.md) - System design and data flow
-
-## macOS Note
-
-On macOS without a GPU (M-series chips), WhisperX works best in a conda environment:
-
-```bash
-conda activate whisperx
-python scripts/transcribe_local.py
-```
+- [Modal Setup](docs/modal-setup.md) - Cloud transcription configuration
+- [Frontend Plan](docs/frontend-plan.md) - Web app roadmap

@@ -2,18 +2,21 @@
 
 ## Prerequisites
 
-- Python 3.10+
-- macOS, Linux, or Windows
+- macOS (Apple Silicon or Intel)
+- Homebrew
 
 ## Installation
 
-### 1. Install uv (recommended)
+### 1. Install Miniforge
 
-uv is a fast Python package manager that replaces pip.
+Miniforge provides conda for managing Python environments.
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+brew install miniforge
+conda init "$(basename "$SHELL")"
 ```
+
+Restart your terminal after running `conda init`.
 
 ### 2. Clone the repository
 
@@ -22,54 +25,67 @@ git clone <repo-url>
 cd PodcastDownloader
 ```
 
-### 3. Create virtual environment
+### 3. Install Modal
+
+Modal is used for cloud GPU transcription and the web API.
 
 ```bash
-uv venv
+# Install in base conda environment
+pip install modal numpy
+
+# Authenticate with Modal (one-time setup)
+modal setup
 ```
 
-### 4. Activate the environment
+### 4. Set up Modal secrets
+
+Create the HuggingFace secret for speaker diarization:
 
 ```bash
-# macOS/Linux
-source .venv/bin/activate
-
-# Windows
-.venv\Scripts\activate
+# Get a token from https://huggingface.co/settings/tokens
+# Accept terms at https://huggingface.co/pyannote/speaker-diarization-3.1
+modal secret create huggingface HF_TOKEN=hf_your_token_here
 ```
 
-### 5. Install dependencies
+### 5. (Optional) Set up WhisperX for local transcription
+
+If you want to run transcription locally instead of on Modal:
 
 ```bash
-uv pip install -r requirements.txt
-```
+# Create whisperx environment
+conda create -n whisperx python=3.10
+conda activate whisperx
 
-## Verify Installation
+# Install PyTorch (CPU for macOS)
+pip install torch torchaudio
 
-```bash
-python -c "import feedparser, requests, jieba, opencc; print('All dependencies installed!')"
+# Install WhisperX
+pip install git+https://github.com/m-bain/whisperx.git
 ```
 
 ## Quick Start
 
-### Download a podcast episode
+### Cloud transcription (recommended)
 
 ```bash
-python scripts/download_podcast.py
+# Transcribe from URL
+modal run scripts/transcribe_modal.py --audio-url "https://example.com/podcast.mp3"
+
+# Transcribe from RSS feed (latest episode)
+modal run scripts/transcribe_modal.py --rss-url "https://example.com/feed.xml"
+
+# Transcribe local file
+modal run scripts/transcribe_modal.py --audio-path "downloads/episode.mp3"
 ```
 
-### Transcribe audio files
+### Local transcription
 
 ```bash
-# Using the batch transcription script
 conda activate whisperx
-python scripts/transcribe_local.py
-
-# Or run WhisperX directly
-whisperx "/path/to/audio.mp3" --language zh --device cpu --compute_type int8 --vad_method silero
+python scripts/transcribe_local.py  # Transcribes all audio in downloads/
 ```
 
-### Semantic Word Merging
+### Post-processing
 
 ```bash
 # Merge Chinese characters into words
@@ -85,50 +101,63 @@ python scripts/convert_to_traditional.py downloads/your_transcript_merged.json
 2. Drag and drop your `.mp3` and `_merged.json` files
 3. Click play and watch words highlight as they're spoken
 
+## Web API (Development)
+
+```bash
+# Deploy the transcription functions first
+modal deploy scripts/transcribe_modal.py
+
+# Run the web API server (hot reload)
+modal serve scripts/app.py
+```
+
+The API will be available at the URL printed by Modal. Visit `/docs` for Swagger UI.
+
 ## Secrets Setup
 
-Some features require API tokens. Copy the example file and add your credentials:
+For podcast downloading, copy the example file and add your credentials:
 
 ```bash
 cp .env.example .env
 # Edit .env with your tokens
 ```
 
-## Cloud Transcription (Optional)
-
-If you don't have a local GPU, use Modal to run transcription in the cloud:
-
-```bash
-pip install modal
-modal setup
-modal run scripts/transcribe_modal.py --audio-url "https://example.com/podcast.mp3"
-```
-
-See [README.md](../README.md) for full Modal documentation.
-
 ## Next Steps
 
-- See [README.md](../README.md) for full tool documentation
+- See [modal-setup.md](modal-setup.md) for detailed Modal configuration
 - See [architecture.md](architecture.md) for system design
+- See [frontend-plan.md](frontend-plan.md) for the web app roadmap
 
 ## Troubleshooting
 
-### Python version issues on macOS
+### Modal not found
 
-If you're getting version conflicts or errors with the system Python, install Miniforge (or Miniconda) to manage Python versions independently.
+Make sure you're using the miniforge base environment:
 
 ```bash
-# Install Miniforge via Homebrew
-brew install miniforge
+# Check where modal is installed
+which modal
+# Should be: /Users/<you>/miniforge3/bin/modal
 
-# Initialize conda for your shell
-conda init "$(basename "$SHELL")"
-
-# Restart your terminal, then create an environment with Python 3.12
-conda create -n podcast python=3.12
-conda activate podcast
+# If not found, install it
+pip install modal
 ```
 
-Then continue with the uv setup from step 1.
+### WhisperX environment issues
 
-Alternatively, you can use [Miniconda](https://docs.conda.io/en/latest/miniconda.html) which works the same way.
+If WhisperX has issues, try recreating the environment:
+
+```bash
+conda deactivate
+conda env remove -n whisperx
+conda create -n whisperx python=3.10
+conda activate whisperx
+pip install torch torchaudio
+pip install git+https://github.com/m-bain/whisperx.git
+```
+
+### Speaker diarization not working
+
+1. Verify the Modal secret exists: `modal secret list`
+2. Check you accepted the pyannote model terms on HuggingFace
+3. See [modal-setup.md](modal-setup.md) for detailed troubleshooting

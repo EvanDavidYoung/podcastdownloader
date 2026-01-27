@@ -6,21 +6,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A webapp for downloading podcasts and generating transcripts. Currently in early development with local hosting for both frontend and backend.
 
+## Python Environment
+
+**Use miniforge (conda), not the .venv.**
+
+The project uses miniforge for Python environment management. The `.venv` directory is legacy and should not be used.
+
+```bash
+# Modal and transcription commands use miniforge base environment
+# Modal is installed at: /Users/evanyoung/miniforge3/bin/modal
+
+# For local WhisperX transcription, use the whisperx conda environment
+conda activate whisperx
+```
+
 ## Development Commands
 
 ```bash
-# Activate virtual environment
-source .venv/bin/activate
-
-# Install dependencies
-uv pip install -r requirements.txt
-
 # Run the podcast downloader
 python scripts/download_podcast.py
 
-# For transcription, use the whisperx conda environment
+# Local transcription (requires whisperx conda env)
 conda activate whisperx
-python scripts/transcribe_local.py  # Transcribe all audio files in downloads/
+python scripts/transcribe_local.py
+
+# Cloud transcription via Modal (uses miniforge base)
+modal run scripts/transcribe_modal.py --audio-path "downloads/episode.mp3"
+
+# Run the web API server (dev mode with hot reload)
+modal serve scripts/app.py
+
+# Deploy to production
+modal deploy scripts/transcribe_modal.py
+modal deploy scripts/app.py
 ```
 
 ## Architecture
@@ -91,6 +109,13 @@ Output files are saved in `downloads/` alongside the audio:
 
 ## Dependencies
 
-Core packages: `feedparser`, `requests`, `jieba`, `opencc-python-reimplemented`
+**Miniforge base environment:**
+- `modal` - Cloud GPU transcription and web deployment
+- `numpy` - Required for Modal result deserialization
 
-Transcription: WhisperX installed in conda environment (`conda activate whisperx`)
+**Whisperx conda environment (`conda activate whisperx`):**
+- WhisperX and PyTorch for local transcription
+
+**Modal cloud (installed in container):**
+- WhisperX, torch, jieba, opencc, feedparser, etc.
+- See `scripts/transcribe_modal.py` for full list
