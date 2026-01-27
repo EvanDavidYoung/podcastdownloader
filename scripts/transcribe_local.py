@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-DOWNLOADS_DIR = Path(__file__).parent / "downloads"
+DOWNLOADS_DIR = Path(__file__).parent.parent / "downloads"
 AUDIO_EXTENSIONS = {".mp3", ".m4a"}
 
 

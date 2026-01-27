@@ -55,22 +55,33 @@ python -c "import feedparser, requests, jieba, opencc; print('All dependencies i
 ### Download a podcast episode
 
 ```bash
-python downloadtranscript.py
+python scripts/download_podcast.py
 ```
 
-### Process a transcript
+### Transcribe audio files
+
+```bash
+# Using the batch transcription script
+conda activate whisperx
+python scripts/transcribe_local.py
+
+# Or run WhisperX directly
+whisperx "/path/to/audio.mp3" --language zh --device cpu --compute_type int8 --vad_method silero
+```
+
+### Semantic Word Merging
 
 ```bash
 # Merge Chinese characters into words
-python merge_chinese_words.py downloads/your_transcript.json
+python scripts/merge_chinese_words.py downloads/your_transcript.json
 
 # Convert to traditional Chinese (optional)
-python convert_to_traditional.py downloads/your_transcript_merged.json
+python scripts/convert_to_traditional.py downloads/your_transcript_merged.json
 ```
 
 ### Test in the player
 
-1. Open `transcript-player.html` in your browser
+1. Open `web/transcript-player.html` in your browser
 2. Drag and drop your `.mp3` and `_merged.json` files
 3. Click play and watch words highlight as they're spoken
 
@@ -83,10 +94,22 @@ cp .env.example .env
 # Edit .env with your tokens
 ```
 
+## Cloud Transcription (Optional)
+
+If you don't have a local GPU, use Modal to run transcription in the cloud:
+
+```bash
+pip install modal
+modal setup
+modal run scripts/transcribe_modal.py --audio-url "https://example.com/podcast.mp3"
+```
+
+See [README.md](../README.md) for full Modal documentation.
+
 ## Next Steps
 
-- See [readme.md](../readme.md) for full tool documentation
-- See [planning.md](planning.md) for project roadmap
+- See [README.md](../README.md) for full tool documentation
+- See [architecture.md](architecture.md) for system design
 
 ## Troubleshooting
 
