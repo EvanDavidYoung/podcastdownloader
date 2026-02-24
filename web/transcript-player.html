@@ -163,6 +163,8 @@
             margin-bottom: 20px;
             padding-bottom: 15px;
             border-bottom: 1px solid #3a3a5a;
+            border-left: 3px solid transparent;
+            padding-left: 10px;
         }
 
         .segment:last-child {
@@ -270,6 +272,39 @@
             font-size: 14px;
         }
 
+        .speaker-badge {
+            display: inline-block;
+            padding: 1px 7px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 600;
+            margin-left: 8px;
+            letter-spacing: 0.5px;
+        }
+
+        .speaker-legend {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #3a3a5a;
+        }
+
+        .speaker-legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .speaker-legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
         /* Scrollbar styling */
         .transcript-container::-webkit-scrollbar {
             width: 8px;
@@ -295,8 +330,8 @@
 
     <div class="drop-zone" id="dropZone">
         <h3>Drop Files Here</h3>
-        <p>Drop your .mp3 and .json files (or click to browse)</p>
-        <input type="file" id="fileInput" multiple accept=".mp3,.json" style="display: none;">
+        <p>Drop your .mp3, .m4a, or .json files (or click to browse)</p>
+        <input type="file" id="fileInput" multiple accept=".mp3,.m4a,.json" style="display: none;">
     </div>
 
     <div class="file-status">
@@ -338,6 +373,7 @@
     </div>
 
     <div class="transcript-container" id="transcriptContainer">
+        <div id="speakerLegend" class="speaker-legend" style="display:none"></div>
         <div id="transcriptContent"></div>
         <div class="legend">
             <div class="legend-item">
@@ -356,6 +392,19 @@
         let transcriptData = null;
         let audioLoaded = false;
         let allWords = [];
+
+        // Speaker diarization colors
+        const SPEAKER_COLORS = ['#6c63ff','#ff6b6b','#48c774','#ffdd57','#3273dc','#ff8c00','#ff69b4','#00d1b2'];
+        let speakerColors = {};
+
+        function buildSpeakerColors(segments) {
+            const speakers = [...new Set(segments.map(s => s.speaker).filter(Boolean))].sort();
+            speakerColors = {};
+            speakers.forEach((speaker, i) => {
+                speakerColors[speaker] = SPEAKER_COLORS[i % SPEAKER_COLORS.length];
+            });
+            return speakers.length > 0;
+        }
 
         // DOM elements
         const dropZone = document.getElementById('dropZone');
@@ -400,7 +449,7 @@
 
         function handleFiles(files) {
             for (const file of files) {
-                if (file.name.endsWith('.mp3') || file.type === 'audio/mpeg') {
+                if (file.name.endsWith('.mp3') || file.name.endsWith('.m4a') || file.type === 'audio/mpeg' || file.type === 'audio/mp4') {
                     loadAudio(file);
                 } else if (file.name.endsWith('.json') || file.type === 'application/json') {
                     loadTranscript(file);
@@ -455,11 +504,33 @@
             if (!transcriptData || !transcriptData.segments) return;
 
             allWords = [];
+            const hasDiarization = buildSpeakerColors(transcriptData.segments);
+
+            // Show/hide speaker legend
+            const legendEl = document.getElementById('speakerLegend');
+            if (hasDiarization) {
+                legendEl.innerHTML = Object.entries(speakerColors).map(([speaker, color]) =>
+                    `<div class="speaker-legend-item">
+                        <div class="speaker-legend-dot" style="background:${color}"></div>
+                        <span style="color:${color}">${speaker}</span>
+                    </div>`
+                ).join('');
+                legendEl.style.display = 'flex';
+            } else {
+                legendEl.style.display = 'none';
+            }
+
             let html = '';
 
             transcriptData.segments.forEach((segment, segIdx) => {
-                html += `<div class="segment">`;
-                html += `<div class="segment-time">${formatTime(segment.start)} - ${formatTime(segment.end)}</div>`;
+                const color = segment.speaker ? speakerColors[segment.speaker] : null;
+                const borderStyle = color ? `style="border-left-color:${color}"` : '';
+                html += `<div class="segment" ${borderStyle}>`;
+                let timeHtml = `${formatTime(segment.start)} - ${formatTime(segment.end)}`;
+                if (color) {
+                    timeHtml += ` <span class="speaker-badge" style="background:${color}22;color:${color};border:1px solid ${color}55">${segment.speaker}</span>`;
+                }
+                html += `<div class="segment-time">${timeHtml}</div>`;
                 html += `<div class="segment-text">`;
 
                 if (segment.words) {

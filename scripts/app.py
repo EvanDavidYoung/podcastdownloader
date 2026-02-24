@@ -41,7 +41,7 @@ if frontend_dist.exists():
 # ---------------------
 
 from fastapi import FastAPI, HTTPException, Depends, Header
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -100,7 +100,6 @@ class JobResponse(BaseModel):
 
 class StatusResponse(BaseModel):
     status: str  # pending, running, completed, error
-    result: Optional[dict] = None
     error: Optional[str] = None
 
 
@@ -206,19 +205,19 @@ async def get_job_status(job_id: str, api_key: str = Depends(verify_api_key)):
 
     Returns:
     - status: pending, running, completed, or error
-    - result: transcript data (if completed)
     - error: error message (if failed)
+
+    Use GET /api/result/{job_id} to fetch the full transcript once completed.
     """
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
 
     job = jobs[job_id]
 
-    # If already completed/errored, return cached result
+    # If already completed/errored, return cached status
     if job["status"] in ("completed", "error"):
         return StatusResponse(
             status=job["status"],
-            result=job.get("result"),
             error=job.get("error"),
         )
 
@@ -229,7 +228,7 @@ async def get_job_status(job_id: str, api_key: str = Depends(verify_api_key)):
         result = call.get(timeout=0)
         job["status"] = "completed"
         job["result"] = result
-        return StatusResponse(status="completed", result=result)
+        return StatusResponse(status="completed")
     except TimeoutError:
         # Still running
         return StatusResponse(status="running")
@@ -237,6 +236,32 @@ async def get_job_status(job_id: str, api_key: str = Depends(verify_api_key)):
         job["status"] = "error"
         job["error"] = str(e)
         return StatusResponse(status="error", error=str(e))
+
+
+@web_app.get("/api/result/{job_id}")
+async def get_job_result(job_id: str, api_key: str = Depends(verify_api_key)):
+    """
+    Fetch the full transcript result for a completed job.
+
+    Downloads as a JSON file. Only available once status is 'completed'.
+    """
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = jobs[job_id]
+
+    if job["status"] == "error":
+        raise HTTPException(status_code=400, detail=job.get("error", "Job failed"))
+    if job["status"] != "completed":
+        raise HTTPException(status_code=202, detail=f"Job is {job['status']}, not yet completed")
+
+    import json
+    content = json.dumps(job["result"], ensure_ascii=False, indent=2)
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": f"attachment; filename=\"transcript-{job_id}.json\""},
+    )
 
 
 @web_app.get("/api/jobs")

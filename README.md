@@ -1,6 +1,8 @@
 # PodcastDownloader
 
-Download podcasts and generate word-synced transcripts for Chinese audio.
+- Download podcasts and generate word-synced transcripts with speaker diarization for Chinese audio. 
+- transcript-player to test transcripts locally
+- Includes a hosted backend API service for cloud transcription.
 
 ## Quick Start
 
@@ -16,6 +18,35 @@ modal setup
 ```
 
 See [docs/getting-started.md](docs/getting-started.md) for full installation instructions.
+
+## Secrets & API Keys
+
+Secrets are stored in `.env` in the project root (gitignored). Copy `.env.example` to get started:
+
+```bash
+cp .env.example .env
+```
+
+**HuggingFace token (`HF_TOKEN`)** is required for diarization (speaker identification). It's configured as a Modal secret — if you create a new Modal deployment or workspace, you'll need to add it there:
+
+```bash
+# Set as a Modal secret
+modal secret create huggingface HF_TOKEN=<your_token>
+```
+
+> Note: It may or may not be necessary to explicitly pass `HF_TOKEN` into the transcription call depending on how the Modal secret is configured.
+
+## Backend API
+
+The app includes a Modal-hosted backend API for cloud transcription:
+
+```bash
+# Run in dev mode with hot reload
+modal serve scripts/app.py
+
+# Deploy to production
+modal deploy scripts/app.py
+```
 
 ## Scripts
 
@@ -36,7 +67,7 @@ conda activate whisperx
 python scripts/transcribe_local.py
 ```
 
-**`scripts/transcribe_modal.py`** - Cloud transcription via Modal GPU (no local GPU required)
+**`scripts/transcribe_modal.py`** - Cloud transcription with diarization via Modal GPU (no local GPU required)
 
 ```bash
 pip install modal
@@ -100,15 +131,18 @@ Config options: `s2t` (default), `s2tw` (Taiwan), `s2hk` (Hong Kong), `t2s` (rev
 
 ### Viewer
 
-**`web/transcript-player.html`** - Browser-based player for testing word-synced transcripts
+**`web/transcript-player.html`** - Browser-based player for testing word-synced transcripts with your own files
 
 1. Open `web/transcript-player.html` in a browser
-2. Drag and drop your `.mp3` and `.json` files onto the drop zone
+2. Drag and drop your audio and `.json` transcript files onto the drop zone
 3. Words highlight as audio plays; click any word to jump to that time
+
+Supports `.mp3` and `.m4a` audio files.
 
 Features:
 - Word-by-word highlighting synced to audio
 - Click-to-seek on any word
+- Speaker diarization display
 - Low confidence word indicators (toggleable)
 - Playback speed control (0.5x - 2x)
 
