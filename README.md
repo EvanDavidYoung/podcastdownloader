@@ -4,6 +4,13 @@
 - transcript-player to test transcripts locally
 - Includes a hosted backend API service for cloud transcription.
 
+## Important Links 
+
+Dev: https://evandavidyoung--podcast-web-serve-dev.modal.run/docs#/
+Prod: https://evandavidyoung--podcast-web-serve.modal.run/docs#/
+
+
+
 ## Quick Start
 
 ```bash
@@ -42,89 +49,89 @@ The app includes a Modal-hosted backend API for cloud transcription:
 
 ```bash
 # Run in dev mode with hot reload
-modal serve scripts/app.py
+modal serve src/app.py
 
 # Deploy to production
-modal deploy scripts/app.py
+modal deploy src/app.py
 ```
 
 ## Scripts
 
 ### Download
 
-**`scripts/download_podcast.py`** - Download the latest episode from an RSS feed
+**`scripts/local/download_podcast.py`** - Download the latest episode from an RSS feed
 
 ```bash
-python scripts/download_podcast.py
+python scripts/local/download_podcast.py
 ```
 
 ### Transcription
 
-**`scripts/transcribe_local.py`** - Batch transcribe audio files locally using WhisperX
+**`scripts/local/transcribe_local.py`** - Batch transcribe audio files locally using WhisperX
 
 ```bash
 conda activate whisperx
-python scripts/transcribe_local.py
+python scripts/local/transcribe_local.py
 ```
 
-**`scripts/transcribe_modal.py`** - Cloud transcription with diarization via Modal GPU (no local GPU required)
+**`scripts/modal/transcribe_modal.py`** - Cloud transcription with diarization via Modal GPU (no local GPU required)
 
 ```bash
 pip install modal
 modal setup
-modal run scripts/transcribe_modal.py --audio-url "https://example.com/podcast.mp3"
+modal run scripts/modal/transcribe_modal.py --audio-url "https://example.com/podcast.mp3"
 ```
 
 Options:
 ```bash
 # Transcribe from RSS feed (latest episode)
-modal run scripts/transcribe_modal.py --rss-url "https://example.com/feed.xml"
+modal run scripts/modal/transcribe_modal.py --rss-url "https://example.com/feed.xml"
 
 # Transcribe local file (uploads to Modal)
-modal run scripts/transcribe_modal.py --audio-path "./downloads/episode.mp3"
+modal run scripts/modal/transcribe_modal.py --audio-path "./downloads/episode.mp3"
 
 # With options
-modal run scripts/transcribe_modal.py --audio-url "..." --language zh --to-traditional
+modal run scripts/modal/transcribe_modal.py --audio-url "..." --language zh --to-traditional
 ```
 
 Deploy as API:
 ```bash
-modal deploy scripts/transcribe_modal.py
+modal deploy scripts/modal/transcribe_modal.py
 ```
 
 ### Post-Processing
 
-**`scripts/merge_chinese_words.py`** - Merge character-level Chinese into semantic words using jieba
+**`scripts/local/merge_chinese_words.py`** - Merge character-level Chinese into semantic words using jieba
 
 WhisperX outputs Chinese as individual characters. This script merges them into words.
 
 ```bash
 # Preview (no file saved)
-python scripts/merge_chinese_words.py --preview downloads/transcript.json
+python scripts/local/merge_chinese_words.py --preview downloads/transcript.json
 
 # Merge and save to transcript_merged.json
-python scripts/merge_chinese_words.py downloads/transcript.json
+python scripts/local/merge_chinese_words.py downloads/transcript.json
 
 # Merge and save to specific path
-python scripts/merge_chinese_words.py downloads/transcript.json output.json
+python scripts/local/merge_chinese_words.py downloads/transcript.json output.json
 ```
 
 Example: `大 | 家 | 好` → `大家 | 好`
 
-**`scripts/convert_to_traditional.py`** - Convert simplified Chinese to traditional using OpenCC
+**`scripts/local/convert_to_traditional.py`** - Convert simplified Chinese to traditional using OpenCC
 
 ```bash
 # Convert to traditional (saves to transcript_traditional.json)
-python scripts/convert_to_traditional.py downloads/transcript.json
+python scripts/local/convert_to_traditional.py downloads/transcript.json
 
 # Preview conversion
-python scripts/convert_to_traditional.py --preview downloads/transcript.json
+python scripts/local/convert_to_traditional.py --preview downloads/transcript.json
 
 # Use Taiwan standard
-python scripts/convert_to_traditional.py --config s2tw downloads/transcript.json
+python scripts/local/convert_to_traditional.py --config s2tw downloads/transcript.json
 
 # Use Hong Kong standard
-python scripts/convert_to_traditional.py --config s2hk downloads/transcript.json
+python scripts/local/convert_to_traditional.py --config s2hk downloads/transcript.json
 ```
 
 Config options: `s2t` (default), `s2tw` (Taiwan), `s2hk` (Hong Kong), `t2s` (reverse)
@@ -150,23 +157,23 @@ Features:
 
 ```bash
 # 1. Download podcast episode
-python scripts/download_podcast.py
+python scripts/local/download_podcast.py
 
 # 2. Transcribe via Modal (cloud GPU)
-modal run scripts/transcribe_modal.py --audio-path "downloads/episode.mp3"
+modal run scripts/modal/transcribe_modal.py --audio-path "downloads/episode.mp3"
 
 # 3. Merge characters into words
-python scripts/merge_chinese_words.py downloads/episode.json
+python scripts/local/merge_chinese_words.py downloads/episode.json
 
 # 4. Optionally convert to traditional
-python scripts/convert_to_traditional.py downloads/episode_merged.json
+python scripts/local/convert_to_traditional.py downloads/episode_merged.json
 
 # 5. Test in browser player
 open web/transcript-player.html
 # Drop the MP3 and merged JSON file
 ```
 
-Or use local transcription with `conda activate whisperx && python scripts/transcribe_local.py`.
+Or use local transcription with `conda activate whisperx && python scripts/local/transcribe_local.py`.
 
 ## Documentation
 

@@ -39,7 +39,7 @@ PodcastDownloader/
 └── ...
 ```
 
-## Backend: scripts/app.py
+## Backend: src/app.py
 
 Main Modal application that:
 1. Serves the React frontend (static files)
@@ -50,8 +50,8 @@ Main Modal application that:
 """
 Modal app serving the podcast transcriber frontend and API.
 
-Deploy: modal deploy scripts/app.py
-Dev:    modal serve scripts/app.py
+Deploy: modal deploy src/app.py
+Dev:    modal serve src/app.py
 """
 
 import modal
@@ -291,7 +291,7 @@ npm install
 npm run dev  # Runs on localhost:5173
 
 # Terminal 2: Modal backend (with hot reload)
-modal serve scripts/app.py  # Runs on Modal, prints URL
+modal serve src/app.py  # Runs on Modal, prints URL
 
 # For frontend dev, proxy API calls to Modal:
 # In vite.config.ts, add proxy config
@@ -304,7 +304,7 @@ modal serve scripts/app.py  # Runs on Modal, prints URL
 cd frontend && npm run build
 
 # 2. Deploy everything to Modal
-modal deploy scripts/app.py
+modal deploy src/app.py
 
 # Output: https://your-app--podcast-transcriber-web-serve.modal.run
 ```

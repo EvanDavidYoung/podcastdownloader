@@ -9,13 +9,13 @@ Usage:
     modal setup
 
     # Run transcription on a URL
-    modal run scripts/transcribe_modal.py --audio-url "https://example.com/podcast.mp3"
+    modal run scripts/modal/transcribe_modal.py --audio-url "https://example.com/podcast.mp3"
 
     # Run on a local file (uploads to Modal)
-    modal run scripts/transcribe_modal.py --audio-path "./downloads/episode.mp3"
+    modal run scripts/modal/transcribe_modal.py --audio-path "./downloads/episode.mp3"
 
     # Deploy as a web endpoint
-    modal deploy scripts/transcribe_modal.py
+    modal deploy scripts/modal/transcribe_modal.py
 """
 
 try:

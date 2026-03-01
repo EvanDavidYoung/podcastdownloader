@@ -8,11 +8,11 @@ This app provides a FastAPI server that:
 
 Usage:
     # Development (hot reload)
-    modal serve scripts/app.py
+    modal serve src/app.py
 
     # Production deployment
     cd frontend && npm run build
-    modal deploy scripts/app.py
+    modal deploy src/app.py
 """
 
 import modal
@@ -27,6 +27,7 @@ web_image = modal.Image.debian_slim(python_version="3.11").pip_install(
     "fastapi[standard]",
     "pydantic",
     "numpy",
+    "python-multipart",
 )
 
 app = modal.App("podcast-web")
@@ -40,11 +41,12 @@ if frontend_dist.exists():
 # FastAPI Application
 # ---------------------
 
-from fastapi import FastAPI, HTTPException, Depends, Header
-from fastapi.responses import JSONResponse, Response
+from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, Form
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
+import json
 import time
 import os
 
@@ -55,14 +57,26 @@ web_app = FastAPI(title="Podcast Transcriber API")
 # Authentication
 # ---------------------
 
-def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")):
-    """Verify the API key from the X-API-Key header."""
-    expected_key = os.environ.get("API_KEY")
-    if not expected_key:
-        raise HTTPException(status_code=500, detail="API_KEY not configured")
-    if x_api_key != expected_key:
+def _valid_api_keys() -> set[str]:
+    """Collect all configured API keys from environment variables."""
+    keys = set()
+    for var in ("API_KEY", "SLACK_BOT_API_KEY"):
+        val = os.environ.get(var)
+        if val:
+            keys.add(val)
+    return keys
+
+
+def verify_api_key(authorization: str = Header(...)):
+    """Verify the API key from the Authorization: Bearer header."""
+    valid_keys = _valid_api_keys()
+    if not valid_keys:
+        raise HTTPException(status_code=500, detail="No API keys configured")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid Authorization header format")
+    if authorization[len("Bearer "):] not in valid_keys:
         raise HTTPException(status_code=401, detail="Invalid API key")
-    return x_api_key
+    return authorization
 
 # Allow CORS for local development
 web_app.add_middleware(
@@ -256,11 +270,16 @@ async def get_job_result(job_id: str, api_key: str = Depends(verify_api_key)):
         raise HTTPException(status_code=202, detail=f"Job is {job['status']}, not yet completed")
 
     import json
+    from urllib.parse import urlparse
+    input_url = job.get("input", "")
+    base = Path(urlparse(input_url).path).stem or job_id
+    filename = f"transcript-{base}.json"
+
     content = json.dumps(job["result"], ensure_ascii=False, indent=2)
     return Response(
         content=content,
         media_type="application/json",
-        headers={"Content-Disposition": f"attachment; filename=\"transcript-{job_id}.json\""},
+        headers={"Content-Disposition": f"attachment; filename=\"{filename}\""},
     )
 
 
@@ -282,6 +301,60 @@ async def list_jobs(api_key: str = Depends(verify_api_key)):
     }
 
 
+@web_app.post("/v1/audio/transcriptions")
+async def openai_transcribe(
+    file: UploadFile,
+    model: str = Form("whisper-1"),
+    language: str = Form("en"),
+    response_format: str = Form("verbose_json"),
+    timestamp_granularities: list[str] = Form(["segment"]),
+    diarize: bool = Form(True),
+    authorization: str = Header(...),
+):
+    """
+    OpenAI Whisper-compatible transcription endpoint.
+
+    Accepts multipart/form-data with an audio file and returns a synchronous
+    JSON response compatible with OpenAI's /v1/audio/transcriptions API.
+
+    Uses StreamingResponse with keep-alive whitespace heartbeats to prevent
+    proxy/gateway timeouts during long transcription jobs.
+    """
+    valid_keys = _valid_api_keys()
+    if not valid_keys:
+        raise HTTPException(status_code=500, detail="No API keys configured")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid Authorization header format")
+    if authorization[len("Bearer "):] not in valid_keys:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    audio_bytes = await file.read()
+    filename = file.filename or "audio.mp3"
+    hf_token = os.environ.get("HF_TOKEN") if diarize else None
+
+    transcribe_fn = modal.Function.from_name("podcast-transcriber", "transcribe_audio")
+    call = transcribe_fn.spawn(
+        audio_bytes=audio_bytes,
+        filename=filename,
+        language=language,
+        hf_token=hf_token,
+    )
+
+    async def stream_result():
+        while True:
+            try:
+                result = call.get(timeout=5)
+                yield json.dumps({
+                    "segments": result["segments"],
+                    "language": result.get("language", language),
+                })
+                return
+            except TimeoutError:
+                yield " "  # keep-alive heartbeat
+
+    return StreamingResponse(stream_result(), media_type="application/json")
+
+
 # ---------------------
 # Modal Function
 # ---------------------
@@ -290,6 +363,7 @@ async def list_jobs(api_key: str = Depends(verify_api_key)):
 @app.function(
     image=web_image,
     scaledown_window=300,
+    timeout=1800,
     secrets=[modal.Secret.from_name("api-auth")],
 )
 @modal.concurrent(max_inputs=100)

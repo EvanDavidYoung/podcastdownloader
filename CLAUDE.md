@@ -24,21 +24,21 @@ conda activate whisperx
 
 ```bash
 # Run the podcast downloader
-python scripts/download_podcast.py
+python scripts/local/download_podcast.py
 
 # Local transcription (requires whisperx conda env)
 conda activate whisperx
-python scripts/transcribe_local.py
+python scripts/local/transcribe_local.py
 
 # Cloud transcription via Modal (uses miniforge base)
-modal run scripts/transcribe_modal.py --audio-path "downloads/episode.mp3"
+modal run scripts/modal/transcribe_modal.py --audio-path "downloads/episode.mp3"
 
 # Run the web API server (dev mode with hot reload)
-modal serve scripts/app.py
+modal serve src/app.py
 
 # Deploy to production
-modal deploy scripts/transcribe_modal.py
-modal deploy scripts/app.py
+modal deploy scripts/modal/transcribe_modal.py
+modal deploy src/app.py
 ```
 
 ## Architecture
@@ -47,10 +47,15 @@ See [docs/architecture.md](docs/architecture.md) for full system documentation.
 
 **Pipeline**: Download → Transcribe → Post-Process → View
 
-**Scripts** (in `scripts/`):
+**Backend server** (in `src/`):
+- `app.py` - FastAPI web server deployed on Modal
+
+**Modal cloud functions** (in `scripts/modal/`):
+- `transcribe_modal.py` - Cloud transcription via Modal GPU
+
+**Local scripts** (in `scripts/local/`):
 - `download_podcast.py` - Download latest episode from RSS feed
 - `transcribe_local.py` - Batch transcribe audio locally via WhisperX
-- `transcribe_modal.py` - Cloud transcription via Modal GPU
 - `merge_chinese_words.py` - Merge character-level to word-level Chinese
 - `convert_to_traditional.py` - Simplified → Traditional Chinese conversion
 
@@ -59,7 +64,9 @@ See [docs/architecture.md](docs/architecture.md) for full system documentation.
 
 ## Key Directories
 
-- `scripts/` - All CLI tools
+- `src/` - Backend server (FastAPI app deployed to Modal)
+- `scripts/local/` - Local CLI tools
+- `scripts/modal/` - Modal cloud functions
 - `web/` - Frontend files
 - `docs/` - Project documentation
 - `downloads/` - Downloaded podcast audio files (gitignored)
@@ -79,7 +86,7 @@ To run a command with your token loaded:
 
 ```bash
 # Option 1: Load .env and run
-export $(cat .env | xargs) && python scripts/download_podcast.py
+export $(cat .env | xargs) && python scripts/local/download_podcast.py
 
 # Option 2: Use python-dotenv (if installed)
 # The script can load .env automatically with: from dotenv import load_dotenv; load_dotenv()
@@ -87,14 +94,14 @@ export $(cat .env | xargs) && python scripts/download_podcast.py
 
 ## Transcription
 
-The `scripts/transcribe_local.py` script transcribes all `.mp3` and `.m4a` files in `downloads/` using WhisperX.
+The `scripts/local/transcribe_local.py` script transcribes all `.mp3` and `.m4a` files in `downloads/` using WhisperX.
 
 ```bash
 conda activate whisperx
-python scripts/transcribe_local.py
+python scripts/local/transcribe_local.py
 ```
 
-Configuration (set in `scripts/transcribe_local.py`):
+Configuration (set in `scripts/local/transcribe_local.py`):
 - Language: Chinese (`zh`)
 - Device: CPU (for M1 Macs without CUDA)
 - Compute type: `int8`
@@ -122,10 +129,10 @@ pip install -r requirements-dev.txt
 pytest
 
 # Run with coverage report
-pytest --cov=scripts --cov-report=term-missing
+pytest --cov=src --cov=scripts/local --cov-report=term-missing
 
 # Generate HTML coverage report
-pytest --cov=scripts --cov-report=html
+pytest --cov=src --cov=scripts/local --cov-report=html
 
 # Run specific test file
 pytest tests/test_merge_chinese_words.py
@@ -149,4 +156,4 @@ Coverage reports are generated in `htmlcov/`. Open `htmlcov/index.html` in a bro
 
 **Modal cloud (installed in container):**
 - WhisperX, torch, jieba, opencc, feedparser, etc.
-- See `scripts/transcribe_modal.py` for full list
+- See `scripts/modal/transcribe_modal.py` for full list

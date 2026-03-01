@@ -1,11 +1,4 @@
-# Ignore podcast audio files but keep the directory
-downloads/*.mp3
-downloads/*.wav
-downloads/*.m4a
-downloads/*.json
-# Alternatively, ignore everything inside the downloads folder
-# downloads/
-!downloads/.gitkeep
+downloads/
 # Python environment and cache
 .venv/
 __pycache__/

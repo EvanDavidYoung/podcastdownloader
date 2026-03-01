@@ -32,16 +32,16 @@ modal secret create huggingface HF_TOKEN=your_token_here
 
 ```bash
 # Transcribe a local file
-modal run scripts/transcribe_modal.py --audio-path "./downloads/episode.mp3"
+modal run scripts/modal/transcribe_modal.py --audio-path "./downloads/episode.mp3"
 
 # Transcribe from URL
-modal run scripts/transcribe_modal.py --audio-url "https://example.com/podcast.mp3"
+modal run scripts/modal/transcribe_modal.py --audio-url "https://example.com/podcast.mp3"
 
 # Transcribe latest episode from RSS feed
-modal run scripts/transcribe_modal.py --rss-url "https://example.com/feed.xml"
+modal run scripts/modal/transcribe_modal.py --rss-url "https://example.com/feed.xml"
 
 # With options
-modal run scripts/transcribe_modal.py --audio-path "file.mp3" --language zh --to-traditional
+modal run scripts/modal/transcribe_modal.py --audio-path "file.mp3" --language zh --to-traditional
 ```
 
 ## Output

@@ -21,7 +21,7 @@ mock_modal.asgi_app.return_value = lambda f: f
 sys.modules["modal"] = mock_modal
 
 # Add scripts to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 # Import specific items we want to test
 from app import (

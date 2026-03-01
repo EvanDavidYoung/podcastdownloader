@@ -69,30 +69,30 @@ pip install git+https://github.com/m-bain/whisperx.git
 
 ```bash
 # Transcribe from URL
-modal run scripts/transcribe_modal.py --audio-url "https://example.com/podcast.mp3"
+modal run scripts/modal/transcribe_modal.py --audio-url "https://example.com/podcast.mp3"
 
 # Transcribe from RSS feed (latest episode)
-modal run scripts/transcribe_modal.py --rss-url "https://example.com/feed.xml"
+modal run scripts/modal/transcribe_modal.py --rss-url "https://example.com/feed.xml"
 
 # Transcribe local file
-modal run scripts/transcribe_modal.py --audio-path "downloads/episode.mp3"
+modal run scripts/modal/transcribe_modal.py --audio-path "downloads/episode.mp3"
 ```
 
 ### Local transcription
 
 ```bash
 conda activate whisperx
-python scripts/transcribe_local.py  # Transcribes all audio in downloads/
+python scripts/local/transcribe_local.py  # Transcribes all audio in downloads/
 ```
 
 ### Post-processing
 
 ```bash
 # Merge Chinese characters into words
-python scripts/merge_chinese_words.py downloads/your_transcript.json
+python scripts/local/merge_chinese_words.py downloads/your_transcript.json
 
 # Convert to traditional Chinese (optional)
-python scripts/convert_to_traditional.py downloads/your_transcript_merged.json
+python scripts/local/convert_to_traditional.py downloads/your_transcript_merged.json
 ```
 
 ### Test in the player
@@ -105,10 +105,10 @@ python scripts/convert_to_traditional.py downloads/your_transcript_merged.json
 
 ```bash
 # Deploy the transcription functions first
-modal deploy scripts/transcribe_modal.py
+modal deploy scripts/modal/transcribe_modal.py
 
 # Run the web API server (hot reload)
-modal serve scripts/app.py
+modal serve src/app.py
 ```
 
 The API will be available at the URL printed by Modal. Visit `/docs` for Swagger UI.
