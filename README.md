@@ -1,65 +1,88 @@
 # PodcastDownloader
 
-- Download podcasts and generate word-synced transcripts with speaker diarization for Chinese audio. 
-- transcript-player to test transcripts locally
-- Includes a hosted backend API service for cloud transcription.
+Download podcasts and generate word-synced transcripts with speaker diarization. Built for Chinese audio with cloud transcription via Modal GPU.
 
-## Important Links 
+## Important Links
 
-Dev: https://evandavidyoung--podcast-web-serve-dev.modal.run/docs#/
-Prod: https://evandavidyoung--podcast-web-serve.modal.run/docs#/
+- Dev API: https://evandavidyoung--podcast-web-serve-dev.modal.run/docs
+- Prod API: https://evandavidyoung--podcast-web-serve.modal.run/docs
 
+## Project Structure
 
-
-## Quick Start
-
-```bash
-# Install Miniforge (if not already installed)
-brew install miniforge
-conda init "$(basename "$SHELL")"
-# Restart terminal
-
-# Install Modal for cloud transcription
-pip install modal numpy
-modal setup
+```
+src/                        # Backend server (deployed to Modal)
+  app.py                    # FastAPI web server
+scripts/
+  local/                    # Local CLI tools
+    download_podcast.py     # Download episodes from RSS
+    transcribe_local.py     # Transcribe audio locally (requires WhisperX)
+    merge_chinese_words.py  # Merge character-level Chinese into words
+    convert_to_traditional.py # Simplified → Traditional Chinese
+  modal/                    # Modal cloud functions
+    transcribe_modal.py     # GPU transcription on Modal
+web/
+  transcript-player.html    # Browser-based transcript player
 ```
 
-See [docs/getting-started.md](docs/getting-started.md) for full installation instructions.
+## Setup
 
-## Secrets & API Keys
+### Development & testing
 
-Secrets are stored in `.env` in the project root (gitignored). Copy `.env.example` to get started:
+```bash
+# Install uv (if not already installed)
+brew install uv
+
+# Install all dependencies
+uv sync --dev
+```
+
+### Cloud transcription (Modal)
+
+```bash
+# Install Modal CLI (uses miniforge or any Python env)
+pip install modal numpy
+modal setup
+
+# Add your HuggingFace token for speaker diarization
+modal secret create huggingface HF_TOKEN=<your_token>
+```
+
+### Local transcription (optional, requires WhisperX)
+
+```bash
+brew install miniforge
+conda create -n whisperx python=3.11
+conda activate whisperx
+pip install whisperx
+```
+
+## Secrets
+
+Copy `.env.example` to `.env` and fill in your tokens:
 
 ```bash
 cp .env.example .env
 ```
 
-**HuggingFace token (`HF_TOKEN`)** is required for diarization (speaker identification). It's configured as a Modal secret — if you create a new Modal deployment or workspace, you'll need to add it there:
-
-```bash
-# Set as a Modal secret
-modal secret create huggingface HF_TOKEN=<your_token>
-```
-
-> Note: It may or may not be necessary to explicitly pass `HF_TOKEN` into the transcription call depending on how the Modal secret is configured.
-
 ## Backend API
 
-The app includes a Modal-hosted backend API for cloud transcription:
+FastAPI server deployed on Modal:
 
 ```bash
-# Run in dev mode with hot reload
+# Dev mode (hot reload)
 modal serve src/app.py
 
-# Deploy to production
+# Production deploy
 modal deploy src/app.py
 ```
+
+Authentication uses `Authorization: Bearer <key>`. Keys are stored in the Modal `api-auth` secret (`API_KEY` and `SLACK_BOT_API_KEY`).
 
 ## Scripts
 
 ### Download
 
-**`scripts/local/download_podcast.py`** - Download the latest episode from an RSS feed
+**`scripts/local/download_podcast.py`** — Download the latest episode from an RSS feed
 
 ```bash
 python scripts/local/download_podcast.py
@@ -67,96 +90,69 @@ python scripts/local/download_podcast.py
 
 ### Transcription
 
-**`scripts/local/transcribe_local.py`** - Batch transcribe audio files locally using WhisperX
+**`scripts/modal/transcribe_modal.py`** — Cloud transcription via Modal GPU (no local GPU required)
+
+```bash
+# From a URL
+modal run scripts/modal/transcribe_modal.py --audio-url "https://example.com/podcast.mp3"
+
+# From an RSS feed (latest episode)
+modal run scripts/modal/transcribe_modal.py --rss-url "https://example.com/feed.xml"
+
+# From a local file (uploads to Modal)
+modal run scripts/modal/transcribe_modal.py --audio-path "./downloads/episode.mp3"
+
+# With options
+modal run scripts/modal/transcribe_modal.py --audio-url "..." --language zh --to-traditional
+
+# Deploy as standalone API endpoint
+modal deploy scripts/modal/transcribe_modal.py
+```
+
+**`scripts/local/transcribe_local.py`** — Transcribe locally using WhisperX (requires WhisperX env)
 
 ```bash
 conda activate whisperx
 python scripts/local/transcribe_local.py
 ```
 
-**`scripts/modal/transcribe_modal.py`** - Cloud transcription with diarization via Modal GPU (no local GPU required)
-
-```bash
-pip install modal
-modal setup
-modal run scripts/modal/transcribe_modal.py --audio-url "https://example.com/podcast.mp3"
-```
-
-Options:
-```bash
-# Transcribe from RSS feed (latest episode)
-modal run scripts/modal/transcribe_modal.py --rss-url "https://example.com/feed.xml"
-
-# Transcribe local file (uploads to Modal)
-modal run scripts/modal/transcribe_modal.py --audio-path "./downloads/episode.mp3"
-
-# With options
-modal run scripts/modal/transcribe_modal.py --audio-url "..." --language zh --to-traditional
-```
-
-Deploy as API:
-```bash
-modal deploy scripts/modal/transcribe_modal.py
-```
-
 ### Post-Processing
 
-**`scripts/local/merge_chinese_words.py`** - Merge character-level Chinese into semantic words using jieba
+**`scripts/local/merge_chinese_words.py`** — Merge character-level Chinese into semantic words using jieba
 
-WhisperX outputs Chinese as individual characters. This script merges them into words.
+WhisperX outputs Chinese as individual characters; this script groups them into words.
 
 ```bash
-# Preview (no file saved)
-python scripts/local/merge_chinese_words.py --preview downloads/transcript.json
-
-# Merge and save to transcript_merged.json
 python scripts/local/merge_chinese_words.py downloads/transcript.json
-
-# Merge and save to specific path
-python scripts/local/merge_chinese_words.py downloads/transcript.json output.json
+python scripts/local/merge_chinese_words.py --preview downloads/transcript.json  # dry run
 ```
 
 Example: `大 | 家 | 好` → `大家 | 好`
 
-**`scripts/local/convert_to_traditional.py`** - Convert simplified Chinese to traditional using OpenCC
+**`scripts/local/convert_to_traditional.py`** — Convert simplified Chinese to traditional using OpenCC
 
 ```bash
-# Convert to traditional (saves to transcript_traditional.json)
 python scripts/local/convert_to_traditional.py downloads/transcript.json
-
-# Preview conversion
-python scripts/local/convert_to_traditional.py --preview downloads/transcript.json
-
-# Use Taiwan standard
-python scripts/local/convert_to_traditional.py --config s2tw downloads/transcript.json
-
-# Use Hong Kong standard
-python scripts/local/convert_to_traditional.py --config s2hk downloads/transcript.json
+python scripts/local/convert_to_traditional.py --config s2tw downloads/transcript.json  # Taiwan
+python scripts/local/convert_to_traditional.py --config s2hk downloads/transcript.json  # HK
 ```
 
 Config options: `s2t` (default), `s2tw` (Taiwan), `s2hk` (Hong Kong), `t2s` (reverse)
 
 ### Viewer
 
-**`web/transcript-player.html`** - Browser-based player for testing word-synced transcripts with your own files
+**`web/transcript-player.html`** — Browser-based player for word-synced transcripts
 
 1. Open `web/transcript-player.html` in a browser
-2. Drag and drop your audio and `.json` transcript files onto the drop zone
-3. Words highlight as audio plays; click any word to jump to that time
+2. Drop your audio file and `.json` transcript onto the drop zone
+3. Words highlight as audio plays; click any word to seek
 
-Supports `.mp3` and `.m4a` audio files.
-
-Features:
-- Word-by-word highlighting synced to audio
-- Click-to-seek on any word
-- Speaker diarization display
-- Low confidence word indicators (toggleable)
-- Playback speed control (0.5x - 2x)
+Features: word-by-word sync, click-to-seek, speaker diarization, low-confidence indicators, speed control (0.5×–2×)
 
 ## Typical Workflow
 
 ```bash
-# 1. Download podcast episode
+# 1. Download episode
 python scripts/local/download_podcast.py
 
 # 2. Transcribe via Modal (cloud GPU)
@@ -168,16 +164,19 @@ python scripts/local/merge_chinese_words.py downloads/episode.json
 # 4. Optionally convert to traditional
 python scripts/local/convert_to_traditional.py downloads/episode_merged.json
 
-# 5. Test in browser player
+# 5. Preview in browser
 open web/transcript-player.html
-# Drop the MP3 and merged JSON file
 ```
 
-Or use local transcription with `conda activate whisperx && python scripts/local/transcribe_local.py`.
+## Testing
+
+```bash
+uv run pytest
+uv run pytest --cov=src --cov=scripts/local --cov-report=term-missing
+```
 
 ## Documentation
 
-- [Getting Started](docs/getting-started.md) - Installation and setup
-- [Architecture](docs/architecture.md) - System design and data flow
-- [Modal Setup](docs/modal-setup.md) - Cloud transcription configuration
-- [Frontend Plan](docs/frontend-plan.md) - Web app roadmap
+- [Getting Started](docs/getting-started.md)
+- [Architecture](docs/architecture.md)
+- [Modal Setup](docs/modal-setup.md)

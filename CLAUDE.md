@@ -116,29 +116,26 @@ Output files are saved in `downloads/` alongside the audio:
 
 ## Testing
 
-**Tests must be run in the whisperx conda environment** (requires jieba, opencc, and other dependencies).
+Tests run via `uv`. All dependencies are declared in `pyproject.toml`.
 
 ```bash
-# Activate the whisperx environment first
-conda activate whisperx
-
-# Install test dependencies (one-time)
-pip install -r requirements-dev.txt
+# Install all dependencies (one-time, or after pyproject.toml changes)
+uv sync --dev
 
 # Run all tests
-pytest
+uv run pytest
 
 # Run with coverage report
-pytest --cov=src --cov=scripts/local --cov-report=term-missing
+uv run pytest --cov=src --cov=scripts/local --cov-report=term-missing
 
 # Generate HTML coverage report
-pytest --cov=src --cov=scripts/local --cov-report=html
+uv run pytest --cov=src --cov=scripts/local --cov-report=html
 
-# Run specific test file
-pytest tests/test_merge_chinese_words.py
+# Run a specific test file
+uv run pytest tests/test_app.py
 
 # Run tests matching a pattern
-pytest -k "test_merge"
+uv run pytest -k "test_merge"
 ```
 
 Coverage reports are generated in `htmlcov/`. Open `htmlcov/index.html` in a browser to view.

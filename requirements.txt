@@ -1,4 +1,0 @@
-feedparser
-requests
-jieba
-opencc-python-reimplemented

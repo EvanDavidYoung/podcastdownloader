@@ -4,7 +4,21 @@ version = "0.1.0"
 description = "Download podcasts and generate word-synced transcripts"
 requires-python = ">=3.10"
 dependencies = [
+    "feedparser>=6.0.0",
+    "jieba>=0.42.0",
+    "opencc-python-reimplemented>=0.1.7",
     "python-multipart>=0.0.22",
+    "requests>=2.28.0",
+]
+
+[dependency-groups]
+dev = [
+    "fastapi[standard]>=0.100.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.0.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.0.0",
 ]
 
 [tool.pytest.ini_options]
@@ -17,7 +31,6 @@ addopts = "-v --tb=short"
 source = ["src", "scripts/local"]
 omit = [
     "scripts/modal/transcribe_modal.py",  # Modal functions require cloud environment
-    "src/app.py",  # FastAPI app requires Modal
 ]
 
 [tool.coverage.report]
