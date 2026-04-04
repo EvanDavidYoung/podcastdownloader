@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Podcast Player</title>
+    <style>
+        * { box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+        }
+
+        h1 {
+            text-align: center;
+            color: #fff;
+            margin-bottom: 8px;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #888;
+            font-size: 14px;
+            margin-bottom: 32px;
+        }
+
+        .loading {
+            text-align: center;
+            color: #888;
+            padding: 40px;
+        }
+
+        .error {
+            text-align: center;
+            color: #ff6b6b;
+            padding: 40px;
+        }
+
+        .empty {
+            text-align: center;
+            color: #888;
+            padding: 60px 20px;
+        }
+
+        .empty p {
+            margin: 8px 0;
+        }
+
+        .job-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .job-card {
+            display: block;
+            background: #252542;
+            border-radius: 12px;
+            padding: 18px 20px;
+            text-decoration: none;
+            color: inherit;
+            border: 1px solid transparent;
+            transition: border-color 0.2s, background 0.2s;
+        }
+
+        .job-card:hover {
+            border-color: #6c63ff;
+            background: #2d2d4a;
+        }
+
+        .job-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #fff;
+            margin-bottom: 6px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .job-meta {
+            display: flex;
+            gap: 16px;
+            font-size: 13px;
+            color: #888;
+            flex-wrap: wrap;
+        }
+
+        .job-type {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.4px;
+            text-transform: uppercase;
+        }
+
+        .job-type.url { background: #2d3a5a; color: #7aadff; }
+        .job-type.rss { background: #3a2d5a; color: #c47aff; }
+
+        .play-arrow {
+            float: right;
+            color: #6c63ff;
+            font-size: 20px;
+            margin-top: -2px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Podcast Player</h1>
+    <p class="subtitle">Completed transcription jobs</p>
+
+    <div id="content" class="loading">Loading jobs...</div>
+
+    <script>
+        async function loadJobs() {
+            const content = document.getElementById('content');
+            try {
+                const resp = await fetch('/api/player/jobs');
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const data = await resp.json();
+
+                if (!data.jobs || data.jobs.length === 0) {
+                    content.className = 'empty';
+                    content.innerHTML = '<p>No completed jobs yet.</p><p>Submit a transcription job via the API to get started.</p>';
+                    return;
+                }
+
+                content.className = 'job-list';
+                content.innerHTML = data.jobs.map(job => {
+                    const date = new Date(job.created_at).toLocaleString();
+                    const title = job.title || job.job_id;
+                    const typeLabel = job.type || 'unknown';
+                    return `
+                        <a class="job-card" href="/player/${job.job_id}">
+                            <span class="play-arrow">&#9654;</span>
+                            <div class="job-title">${escapeHtml(title)}</div>
+                            <div class="job-meta">
+                                <span class="job-type ${typeLabel}">${typeLabel}</span>
+                                <span>${date}</span>
+                                <span>${escapeHtml(job.language || '')}</span>
+                            </div>
+                        </a>
+                    `;
+                }).join('');
+            } catch (err) {
+                content.className = 'error';
+                content.textContent = 'Failed to load jobs: ' + err.message;
+            }
+        }
+
+        function escapeHtml(str) {
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        loadJobs();
+    </script>
+</body>
+</html>

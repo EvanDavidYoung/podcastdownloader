@@ -37,20 +37,31 @@ frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
 if frontend_dist.exists():
     web_image = web_image.add_local_dir(str(frontend_dist), remote_path="/assets")
 
+# Include web/ directory for player pages
+web_dir = Path(__file__).parent.parent / "web"
+if web_dir.exists():
+    web_image = web_image.add_local_dir(str(web_dir), remote_path="/web")
+
+# Persistent volume for completed job artifacts (transcript, audio, metadata)
+jobs_volume = modal.Volume.from_name("podcast-jobs", create_if_missing=True)
+
 # ---------------------
 # FastAPI Application
 # ---------------------
 
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, Form
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional
 import json
 import time
 import os
+import uuid
 
 web_app = FastAPI(title="Podcast Transcriber API")
+_bearer = HTTPBearer()
 
 
 # ---------------------
@@ -60,23 +71,21 @@ web_app = FastAPI(title="Podcast Transcriber API")
 def _valid_api_keys() -> set[str]:
     """Collect all configured API keys from environment variables."""
     keys = set()
-    for var in ("API_KEY", "SLACK_BOT_API_KEY"):
+    for var in ("FASTAPI_APIKEY", "SLACK_BOT_API_KEY"):
         val = os.environ.get(var)
         if val:
             keys.add(val)
     return keys
 
 
-def verify_api_key(authorization: str = Header(...)):
+def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(_bearer)):
     """Verify the API key from the Authorization: Bearer header."""
     valid_keys = _valid_api_keys()
     if not valid_keys:
         raise HTTPException(status_code=500, detail="No API keys configured")
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid Authorization header format")
-    if authorization[len("Bearer "):] not in valid_keys:
+    if credentials.credentials not in valid_keys:
         raise HTTPException(status_code=401, detail="Invalid API key")
-    return authorization
+    return credentials.credentials
 
 # Allow CORS for local development
 web_app.add_middleware(
@@ -156,6 +165,9 @@ async def transcribe_from_url(req: TranscribeURLRequest, api_key: str = Depends(
     """
     cleanup_old_jobs()
 
+    # Pre-generate job ID so the transcription function can self-identify for artifact storage
+    job_id = str(uuid.uuid4())
+
     # Look up the deployed transcription function
     transcribe_fn = modal.Function.from_name("podcast-transcriber", "transcribe_from_url")
 
@@ -165,9 +177,9 @@ async def transcribe_from_url(req: TranscribeURLRequest, api_key: str = Depends(
         language=req.language,
         merge_words=req.merge_words,
         to_traditional=req.to_traditional,
+        job_id=job_id,
     )
 
-    job_id = call.object_id
     jobs[job_id] = {
         "call": call,
         "created_at": time.time(),
@@ -188,6 +200,9 @@ async def transcribe_from_rss(req: TranscribeRSSRequest, api_key: str = Depends(
     """
     cleanup_old_jobs()
 
+    # Pre-generate job ID so the transcription function can self-identify for artifact storage
+    job_id = str(uuid.uuid4())
+
     # Look up the deployed transcription function
     transcribe_fn = modal.Function.from_name("podcast-transcriber", "transcribe_from_rss")
 
@@ -198,9 +213,9 @@ async def transcribe_from_rss(req: TranscribeRSSRequest, api_key: str = Depends(
         language=req.language,
         merge_words=req.merge_words,
         to_traditional=req.to_traditional,
+        job_id=job_id,
     )
 
-    job_id = call.object_id
     jobs[job_id] = {
         "call": call,
         "created_at": time.time(),
@@ -301,6 +316,64 @@ async def list_jobs(api_key: str = Depends(verify_api_key)):
     }
 
 
+# ---------------------
+# Player endpoints (no auth — job IDs are UUIDs, functionally unguessable)
+# ---------------------
+
+
+@web_app.get("/api/player/jobs")
+async def list_player_jobs():
+    """List all completed jobs from persistent volume, sorted newest first."""
+    jobs_volume.reload()
+    jobs_dir = Path("/jobs")
+    result = []
+    if jobs_dir.exists():
+        for job_dir in sorted(jobs_dir.iterdir()):
+            meta_path = job_dir / "metadata.json"
+            if meta_path.exists():
+                with open(meta_path) as f:
+                    result.append(json.load(f))
+    result.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    return {"jobs": result}
+
+
+@web_app.get("/api/player/transcript/{job_id}")
+async def get_player_transcript(job_id: str):
+    """Serve the transcript JSON for a completed job."""
+    jobs_volume.reload()
+    transcript_path = Path(f"/jobs/{job_id}/transcript.json")
+    if not transcript_path.exists():
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    return Response(content=transcript_path.read_text(encoding="utf-8"), media_type="application/json")
+
+
+@web_app.get("/api/player/audio/{job_id}")
+async def get_player_audio(job_id: str):
+    """Stream the audio file for a completed job."""
+    jobs_volume.reload()
+    audio_path = Path(f"/jobs/{job_id}/audio.mp3")
+    if not audio_path.exists():
+        raise HTTPException(status_code=404, detail="Audio not found")
+
+    def iterfile():
+        with open(audio_path, "rb") as f:
+            yield from f
+
+    return StreamingResponse(iterfile(), media_type="audio/mpeg")
+
+
+@web_app.get("/player")
+async def player_listing():
+    """Job listing page — lists all completed transcription jobs."""
+    return FileResponse("/web/player.html")
+
+
+@web_app.get("/player/{job_id}")
+async def player_detail(job_id: str):
+    """Transcript player for a specific job."""
+    return FileResponse("/web/player-detail.html")
+
+
 @web_app.post("/v1/audio/transcriptions")
 async def openai_transcribe(
     file: UploadFile,
@@ -309,7 +382,7 @@ async def openai_transcribe(
     response_format: str = Form("verbose_json"),
     timestamp_granularities: list[str] = Form(["segment"]),
     diarize: bool = Form(True),
-    authorization: str = Header(...),
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer),
 ):
     """
     OpenAI Whisper-compatible transcription endpoint.
@@ -323,9 +396,7 @@ async def openai_transcribe(
     valid_keys = _valid_api_keys()
     if not valid_keys:
         raise HTTPException(status_code=500, detail="No API keys configured")
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid Authorization header format")
-    if authorization[len("Bearer "):] not in valid_keys:
+    if credentials.credentials not in valid_keys:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     audio_bytes = await file.read()
@@ -365,6 +436,7 @@ async def openai_transcribe(
     scaledown_window=300,
     timeout=1800,
     secrets=[modal.Secret.from_name("api-auth")],
+    volumes={"/jobs": jobs_volume},
 )
 @modal.concurrent(max_inputs=100)
 @modal.asgi_app()

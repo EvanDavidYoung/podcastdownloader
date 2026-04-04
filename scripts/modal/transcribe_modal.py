@@ -49,6 +49,10 @@ app = modal.App("podcast-transcriber", image=image)
 model_cache = modal.Volume.from_name("whisperx-models", create_if_missing=True)
 MODEL_CACHE_PATH = "/cache/models"
 
+# Persistent volume for completed job artifacts (transcript, audio, metadata)
+jobs_volume = modal.Volume.from_name("podcast-jobs", create_if_missing=True)
+JOBS_PATH = "/jobs"
+
 
 @app.function(
     gpu="T4",  # Options: "T4", "A10G", "A100", "H100"
@@ -228,7 +232,7 @@ def convert_to_traditional(data: dict, config: str = 's2t') -> dict:
 @app.function(
     gpu="T4",
     timeout=1800,
-    volumes={MODEL_CACHE_PATH: model_cache},
+    volumes={MODEL_CACHE_PATH: model_cache, JOBS_PATH: jobs_volume},
     secrets=[modal.Secret.from_name("huggingface", required_keys=["HF_TOKEN"])],
 )
 def transcribe_from_url(
@@ -237,9 +241,13 @@ def transcribe_from_url(
     merge_words: bool = True,
     to_traditional: bool = False,
     hf_token: str = None,
+    job_id: str = None,
 ) -> dict:
     """Download and transcribe audio from a URL."""
+    import json
     import requests
+    from datetime import datetime, timezone
+    from pathlib import Path
 
     print(f"Downloading from {url}...")
     response = requests.get(url, timeout=300)
@@ -247,7 +255,7 @@ def transcribe_from_url(
 
     filename = url.split("/")[-1].split("?")[0] or "audio.mp3"
 
-    return transcribe_audio.local(
+    result = transcribe_audio.local(
         audio_bytes=response.content,
         filename=filename,
         language=language,
@@ -256,11 +264,30 @@ def transcribe_from_url(
         hf_token=hf_token,
     )
 
+    if job_id:
+        job_dir = Path(f"{JOBS_PATH}/{job_id}")
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / "transcript.json").write_text(json.dumps(result, ensure_ascii=False))
+        (job_dir / "audio.mp3").write_bytes(response.content)
+        metadata = {
+            "job_id": job_id,
+            "title": filename,
+            "language": language,
+            "type": "url",
+            "input": url,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (job_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False))
+        jobs_volume.commit()
+        print(f"Artifacts saved to volume at /jobs/{job_id}/")
+
+    return result
+
 
 @app.function(
     gpu="T4",
     timeout=1800,
-    volumes={MODEL_CACHE_PATH: model_cache},
+    volumes={MODEL_CACHE_PATH: model_cache, JOBS_PATH: jobs_volume},
     secrets=[modal.Secret.from_name("huggingface", required_keys=["HF_TOKEN"])],
 )
 def transcribe_from_rss(
@@ -270,10 +297,14 @@ def transcribe_from_rss(
     merge_words: bool = True,
     to_traditional: bool = False,
     hf_token: str = None,
+    job_id: str = None,
 ) -> dict:
     """Download and transcribe the latest (or specified) episode from an RSS feed."""
+    import json
     import feedparser
     import requests
+    from datetime import datetime, timezone
+    from pathlib import Path
 
     print(f"Fetching RSS feed: {rss_url}")
     feed = feedparser.parse(rss_url)
@@ -315,6 +346,24 @@ def transcribe_from_rss(
     )
 
     result["episode_title"] = title
+
+    if job_id:
+        job_dir = Path(f"{JOBS_PATH}/{job_id}")
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / "transcript.json").write_text(json.dumps(result, ensure_ascii=False))
+        (job_dir / "audio.mp3").write_bytes(response.content)
+        metadata = {
+            "job_id": job_id,
+            "title": title,
+            "language": language,
+            "type": "rss",
+            "input": rss_url,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (job_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False))
+        jobs_volume.commit()
+        print(f"Artifacts saved to volume at /jobs/{job_id}/")
+
     return result
 
 

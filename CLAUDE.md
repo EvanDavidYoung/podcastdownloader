@@ -92,6 +92,32 @@ export $(cat .env | xargs) && python scripts/local/download_podcast.py
 # The script can load .env automatically with: from dotenv import load_dotenv; load_dotenv()
 ```
 
+### Modal secrets
+
+**WARNING: `modal secret create` replaces the entire secret.** Always include ALL keys
+in the same command or you will lose the ones you omit.
+
+```bash
+# Update api-auth — must include every key every time
+# Use --force to overwrite an existing secret
+modal secret create --force api-auth \
+  FASTAPI_APIKEY=<key> \
+  SLACK_BOT_API_KEY=<slack-key>
+```
+
+Alternatively, edit secrets in the Modal web dashboard (Secrets → api-auth → Edit) to
+avoid accidentally dropping keys.
+
+The `api-auth` secret currently holds:
+- `FASTAPI_APIKEY` — main API key for the web server
+- `SLACK_BOT_API_KEY` — key for the Slack bot integration
+
+After updating a Modal secret, redeploy for the new values to take effect:
+
+```bash
+modal deploy src/app.py
+```
+
 ## Transcription
 
 The `scripts/local/transcribe_local.py` script transcribes all `.mp3` and `.m4a` files in `downloads/` using WhisperX.

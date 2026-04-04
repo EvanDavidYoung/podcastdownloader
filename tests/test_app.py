@@ -1,10 +1,12 @@
 """Tests for the FastAPI web application (src/app.py)."""
 
 import io
+import json
 import sys
 import time
+import uuid
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import ANY, MagicMock, Mock, patch
 
 import pytest
 
@@ -26,6 +28,7 @@ sys.modules["modal"] = mock_modal
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from fastapi import HTTPException  # noqa: E402
+from fastapi.security import HTTPAuthorizationCredentials  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import (  # noqa: E402
@@ -65,8 +68,8 @@ def clear_jobs():
 
 @pytest.fixture
 def client():
-    """TestClient with API_KEY configured in the environment."""
-    with patch.dict("os.environ", {"API_KEY": API_KEY}):
+    """TestClient with FASTAPI_APIKEY configured in the environment."""
+    with patch.dict("os.environ", {"FASTAPI_APIKEY": API_KEY}):
         yield TestClient(web_app)
 
 
@@ -100,7 +103,7 @@ class TestValidApiKeys:
             assert _valid_api_keys() == set()
 
     def test_returns_api_key(self):
-        with patch.dict("os.environ", {"API_KEY": "k1"}, clear=True):
+        with patch.dict("os.environ", {"FASTAPI_APIKEY": "k1"}, clear=True):
             assert _valid_api_keys() == {"k1"}
 
     def test_returns_slack_bot_key(self):
@@ -108,46 +111,42 @@ class TestValidApiKeys:
             assert _valid_api_keys() == {"s1"}
 
     def test_returns_both_keys_when_both_configured(self):
-        with patch.dict("os.environ", {"API_KEY": "k1", "SLACK_BOT_API_KEY": "s1"}, clear=True):
+        with patch.dict("os.environ", {"FASTAPI_APIKEY": "k1", "SLACK_BOT_API_KEY": "s1"}, clear=True):
             assert _valid_api_keys() == {"k1", "s1"}
 
 
 class TestVerifyApiKey:
     """verify_api_key() enforces Authorization: Bearer authentication."""
 
+    def _creds(self, token: str) -> HTTPAuthorizationCredentials:
+        return HTTPAuthorizationCredentials(scheme="bearer", credentials=token)
+
     def test_raises_500_when_no_keys_configured(self):
         with patch.dict("os.environ", {}, clear=True):
             with pytest.raises(HTTPException) as exc:
-                verify_api_key("Bearer anything")
+                verify_api_key(self._creds("anything"))
             assert exc.value.status_code == 500
 
-    def test_raises_401_when_bearer_prefix_missing(self):
-        with patch.dict("os.environ", {"API_KEY": API_KEY}):
-            with pytest.raises(HTTPException) as exc:
-                verify_api_key(API_KEY)  # raw key, no "Bearer " prefix
-            assert exc.value.status_code == 401
-            assert "format" in exc.value.detail.lower()
-
     def test_raises_401_for_wrong_key(self):
-        with patch.dict("os.environ", {"API_KEY": API_KEY}):
+        with patch.dict("os.environ", {"FASTAPI_APIKEY": API_KEY}):
             with pytest.raises(HTTPException) as exc:
-                verify_api_key("Bearer wrong-key")
+                verify_api_key(self._creds("wrong-key"))
             assert exc.value.status_code == 401
 
     def test_accepts_valid_api_key(self):
-        with patch.dict("os.environ", {"API_KEY": API_KEY}):
-            result = verify_api_key(f"Bearer {API_KEY}")
-        assert result == f"Bearer {API_KEY}"
+        with patch.dict("os.environ", {"FASTAPI_APIKEY": API_KEY}):
+            result = verify_api_key(self._creds(API_KEY))
+        assert result == API_KEY
 
     def test_accepts_slack_bot_key(self):
         with patch.dict("os.environ", {"SLACK_BOT_API_KEY": SLACK_KEY}):
-            result = verify_api_key(f"Bearer {SLACK_KEY}")
-        assert result == f"Bearer {SLACK_KEY}"
+            result = verify_api_key(self._creds(SLACK_KEY))
+        assert result == SLACK_KEY
 
     def test_accepts_either_key_when_both_configured(self):
-        with patch.dict("os.environ", {"API_KEY": API_KEY, "SLACK_BOT_API_KEY": SLACK_KEY}):
-            verify_api_key(f"Bearer {API_KEY}")
-            verify_api_key(f"Bearer {SLACK_KEY}")
+        with patch.dict("os.environ", {"FASTAPI_APIKEY": API_KEY, "SLACK_BOT_API_KEY": SLACK_KEY}):
+            verify_api_key(self._creds(API_KEY))
+            verify_api_key(self._creds(SLACK_KEY))
 
 
 class TestCleanupOldJobs:
@@ -252,24 +251,24 @@ class TestAuthentication:
 
     @pytest.fixture
     def c(self):
-        with patch.dict("os.environ", {"API_KEY": API_KEY}):
+        with patch.dict("os.environ", {"FASTAPI_APIKEY": API_KEY}):
             yield TestClient(web_app, raise_server_exceptions=False)
 
     # -- Header missing --
 
-    def test_missing_auth_header_returns_422(self, c):
-        """FastAPI returns 422 Unprocessable Entity when the required header is absent."""
-        assert c.get("/api/jobs").status_code == 422
-        assert c.get("/api/status/x").status_code == 422
-        assert c.get("/api/result/x").status_code == 422
+    def test_missing_auth_header_returns_4xx(self, c):
+        """HTTPBearer returns 4xx when the Authorization header is absent."""
+        assert c.get("/api/jobs").status_code in (401, 403)
+        assert c.get("/api/status/x").status_code in (401, 403)
+        assert c.get("/api/result/x").status_code in (401, 403)
 
     # -- Wrong format / wrong key --
 
-    def test_raw_key_without_bearer_prefix_returns_401(self, c):
-        """Sending the raw key without the 'Bearer ' prefix is rejected."""
+    def test_raw_key_without_bearer_prefix_returns_4xx(self, c):
+        """HTTPBearer returns 4xx when the Authorization header isn't in Bearer format."""
         bad = {"Authorization": API_KEY}
-        assert c.get("/api/jobs", headers=bad).status_code == 401
-        assert c.get("/api/status/x", headers=bad).status_code == 401
+        assert c.get("/api/jobs", headers=bad).status_code in (401, 403)
+        assert c.get("/api/status/x", headers=bad).status_code in (401, 403)
 
     def test_wrong_key_returns_401(self, c):
         bad = {"Authorization": "Bearer totally-wrong"}
@@ -324,7 +323,7 @@ class TestTranscribeURLEndpoint:
     """POST /api/transcribe/url — kick off transcription from a direct audio URL."""
 
     def test_returns_job_id_with_running_status(self, client, mock_fn):
-        """A valid request spawns a Modal job and immediately returns its ID."""
+        """A valid request spawns a Modal job and immediately returns a UUID job ID."""
         resp = client.post(
             "/api/transcribe/url",
             json={"url": "https://example.com/ep.mp3"},
@@ -332,20 +331,22 @@ class TestTranscribeURLEndpoint:
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["job_id"] == "job-abc123"
+        # job_id is a pre-generated UUID, not Modal's call.object_id
+        assert uuid.UUID(data["job_id"])  # valid UUID
         assert data["status"] == "running"
 
     def test_job_stored_in_memory(self, client, mock_fn):
         """After a successful request the job is tracked in the jobs dict."""
-        client.post(
+        resp = client.post(
             "/api/transcribe/url",
             json={"url": "https://example.com/ep.mp3"},
             headers=AUTH,
         )
-        assert "job-abc123" in jobs
-        assert jobs["job-abc123"]["type"] == "url"
-        assert jobs["job-abc123"]["input"] == "https://example.com/ep.mp3"
-        assert jobs["job-abc123"]["status"] == "running"
+        job_id = resp.json()["job_id"]
+        assert job_id in jobs
+        assert jobs[job_id]["type"] == "url"
+        assert jobs[job_id]["input"] == "https://example.com/ep.mp3"
+        assert jobs[job_id]["status"] == "running"
 
     def test_all_params_forwarded_to_modal(self, client, mock_fn):
         """language, merge_words, and to_traditional are passed through to the Modal function."""
@@ -365,6 +366,7 @@ class TestTranscribeURLEndpoint:
             language="en",
             merge_words=False,
             to_traditional=True,
+            job_id=ANY,
         )
 
     def test_defaults_to_chinese_with_merge_words(self, client, mock_fn):
@@ -380,6 +382,7 @@ class TestTranscribeURLEndpoint:
             language="zh",
             merge_words=True,
             to_traditional=False,
+            job_id=ANY,
         )
 
 
@@ -393,17 +396,18 @@ class TestTranscribeRSSEndpoint:
             headers=AUTH,
         )
         assert resp.status_code == 200
-        assert resp.json()["job_id"] == "job-abc123"
+        assert uuid.UUID(resp.json()["job_id"])  # valid UUID
         assert resp.json()["status"] == "running"
 
     def test_job_stored_with_rss_type(self, client, mock_fn):
-        client.post(
+        resp = client.post(
             "/api/transcribe/rss",
             json={"rss_url": "https://example.com/feed.xml"},
             headers=AUTH,
         )
-        assert jobs["job-abc123"]["type"] == "rss"
-        assert jobs["job-abc123"]["input"] == "https://example.com/feed.xml"
+        job_id = resp.json()["job_id"]
+        assert jobs[job_id]["type"] == "rss"
+        assert jobs[job_id]["input"] == "https://example.com/feed.xml"
 
     def test_episode_index_forwarded_to_modal(self, client, mock_fn):
         """Non-default episode_index is passed through to the Modal function."""
@@ -419,6 +423,7 @@ class TestTranscribeRSSEndpoint:
             language="zh",
             merge_words=True,
             to_traditional=False,
+            job_id=ANY,
         )
 
 
@@ -710,3 +715,134 @@ class TestOpenAITranscribeEndpoint:
             )
 
         assert resp.status_code == 200
+
+
+class TestPlayerJobsEndpoint:
+    """GET /api/player/jobs — list jobs from persistent volume (no auth)."""
+
+    def test_returns_empty_list_when_jobs_dir_missing(self):
+        """Returns an empty list when the /jobs directory doesn't exist."""
+        with patch("app.jobs_volume"):
+            with patch("app.Path") as mock_path_cls:
+                mock_jobs_dir = Mock()
+                mock_jobs_dir.exists.return_value = False
+                mock_path_cls.return_value = mock_jobs_dir
+                resp = TestClient(web_app).get("/api/player/jobs")
+        assert resp.status_code == 200
+        assert resp.json() == {"jobs": []}
+
+    def test_no_auth_required(self):
+        """Player listing endpoint is public (no Authorization header needed)."""
+        with patch("app.jobs_volume"):
+            with patch("app.Path") as mock_path_cls:
+                mock_jobs_dir = Mock()
+                mock_jobs_dir.exists.return_value = False
+                mock_path_cls.return_value = mock_jobs_dir
+                resp = TestClient(web_app).get("/api/player/jobs")
+        # 200 (not 403/401) confirms no auth requirement
+        assert resp.status_code == 200
+
+    def test_returns_sorted_jobs_from_volume(self, tmp_path):
+        """Returns jobs from metadata.json files, sorted newest first."""
+        job1_dir = tmp_path / "job-1"
+        job1_dir.mkdir()
+        meta1 = {"job_id": "job-1", "title": "Older Episode", "created_at": "2024-01-01T00:00:00+00:00", "type": "url", "language": "zh"}
+        (job1_dir / "metadata.json").write_text(json.dumps(meta1))
+
+        job2_dir = tmp_path / "job-2"
+        job2_dir.mkdir()
+        meta2 = {"job_id": "job-2", "title": "Newer Episode", "created_at": "2024-06-01T00:00:00+00:00", "type": "rss", "language": "zh"}
+        (job2_dir / "metadata.json").write_text(json.dumps(meta2))
+
+        with patch("app.jobs_volume"):
+            with patch("app.Path", return_value=tmp_path):
+                resp = TestClient(web_app).get("/api/player/jobs")
+
+        assert resp.status_code == 200
+        jobs_list = resp.json()["jobs"]
+        assert len(jobs_list) == 2
+        # Newer episode should be first
+        assert jobs_list[0]["job_id"] == "job-2"
+        assert jobs_list[1]["job_id"] == "job-1"
+
+
+class TestPlayerTranscriptEndpoint:
+    """GET /api/player/transcript/{job_id} — serve transcript JSON (no auth)."""
+
+    def test_404_when_transcript_missing(self):
+        """Returns 404 when the transcript file doesn't exist in the volume."""
+        with patch("app.jobs_volume"):
+            resp = TestClient(web_app).get("/api/player/transcript/nonexistent-id")
+        assert resp.status_code == 404
+
+    def test_no_auth_required(self):
+        """Transcript endpoint is public."""
+        with patch("app.jobs_volume"):
+            resp = TestClient(web_app).get("/api/player/transcript/some-id")
+        assert resp.status_code == 404  # 404 not found, not 403 forbidden
+
+    def test_returns_transcript_json(self, tmp_path):
+        """Returns the transcript JSON content when the file exists."""
+        transcript = {"segments": [{"text": "你好", "start": 0.0, "end": 1.0}], "language": "zh"}
+        job_dir = tmp_path / "my-job-id"
+        job_dir.mkdir()
+        (job_dir / "transcript.json").write_text(json.dumps(transcript, ensure_ascii=False))
+
+        def fake_path(path_str):
+            # Map /jobs/my-job-id/transcript.json → tmp_path / my-job-id / transcript.json
+            return tmp_path / "/".join(str(path_str).split("/")[2:])
+
+        with patch("app.jobs_volume"):
+            with patch("app.Path", side_effect=fake_path):
+                resp = TestClient(web_app).get("/api/player/transcript/my-job-id")
+
+        assert resp.status_code == 200
+        assert resp.json() == transcript
+
+
+class TestPlayerAudioEndpoint:
+    """GET /api/player/audio/{job_id} — stream audio (no auth)."""
+
+    def test_404_when_audio_missing(self):
+        """Returns 404 when the audio file doesn't exist in the volume."""
+        with patch("app.jobs_volume"):
+            resp = TestClient(web_app).get("/api/player/audio/nonexistent-id")
+        assert resp.status_code == 404
+
+    def test_no_auth_required(self):
+        """Audio endpoint is public."""
+        with patch("app.jobs_volume"):
+            resp = TestClient(web_app).get("/api/player/audio/some-id")
+        assert resp.status_code == 404  # 404 not found, not 403 forbidden
+
+    def test_returns_audio_bytes_with_correct_content_type(self, tmp_path):
+        """Streams audio bytes with audio/mpeg content type."""
+        job_dir = tmp_path / "my-job-id"
+        job_dir.mkdir()
+        audio_bytes = b"fake-mp3-data"
+        (job_dir / "audio.mp3").write_bytes(audio_bytes)
+
+        def fake_path(path_str):
+            return tmp_path / "/".join(str(path_str).split("/")[2:])
+
+        with patch("app.jobs_volume"):
+            with patch("app.Path", side_effect=fake_path):
+                resp = TestClient(web_app).get("/api/player/audio/my-job-id")
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "audio/mpeg"
+        assert resp.content == audio_bytes
+
+
+class TestPlayerHTMLRoutes:
+    """GET /player and /player/{job_id} — serve HTML pages (no auth)."""
+
+    def test_player_listing_no_auth_required(self):
+        """/player is accessible without auth (returns 200 or error for missing file, never 403)."""
+        resp = TestClient(web_app, raise_server_exceptions=False).get("/player")
+        assert resp.status_code != 403
+
+    def test_player_detail_no_auth_required(self):
+        """/player/{job_id} is accessible without auth."""
+        resp = TestClient(web_app, raise_server_exceptions=False).get("/player/some-uuid")
+        assert resp.status_code != 403
