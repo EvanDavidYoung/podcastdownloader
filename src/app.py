@@ -28,6 +28,7 @@ web_image = modal.Image.debian_slim(python_version="3.11").pip_install(
     "pydantic",
     "numpy",
     "python-multipart",
+    "httpx",
 )
 
 app = modal.App("podcast-web")
@@ -49,12 +50,13 @@ jobs_volume = modal.Volume.from_name("podcast-jobs", create_if_missing=True)
 # FastAPI Application
 # ---------------------
 
-from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, Form
+from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, Form, BackgroundTasks
 from fastapi.responses import JSONResponse, Response, StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional
+import asyncio
 import json
 import time
 import os
@@ -106,6 +108,7 @@ class TranscribeURLRequest(BaseModel):
     language: str = "zh"
     merge_words: bool = True
     to_traditional: bool = False
+    callback_url: Optional[str] = None
 
 
 class TranscribeRSSRequest(BaseModel):
@@ -114,6 +117,7 @@ class TranscribeRSSRequest(BaseModel):
     language: str = "zh"
     merge_words: bool = True
     to_traditional: bool = False
+    callback_url: Optional[str] = None
 
 
 class JobResponse(BaseModel):
@@ -146,6 +150,33 @@ def cleanup_old_jobs():
 
 
 # ---------------------
+# Webhook delivery
+# ---------------------
+
+
+async def _watch_and_callback(job_id: str, call, callback_url: str):
+    """Wait for a Modal job to finish, then POST the result to the callback URL."""
+    import httpx
+
+    try:
+        result = await asyncio.to_thread(call.get, timeout=JOB_TTL_SECONDS)
+        jobs[job_id]["status"] = "completed"
+        jobs[job_id]["result"] = result
+        payload = {"job_id": job_id, "status": "completed", "result": result}
+    except Exception as e:
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = str(e)
+        payload = {"job_id": job_id, "status": "error", "error": str(e)}
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            await client.post(callback_url, json=payload)
+        print(f"Webhook delivered for job {job_id} to {callback_url}")
+    except Exception as e:
+        print(f"Webhook delivery failed for job {job_id}: {e}")
+
+
+# ---------------------
 # API Endpoints
 # ---------------------
 
@@ -157,11 +188,16 @@ async def health_check():
 
 
 @web_app.post("/api/transcribe/url", response_model=JobResponse)
-async def transcribe_from_url(req: TranscribeURLRequest, api_key: str = Depends(verify_api_key)):
+async def transcribe_from_url(
+    req: TranscribeURLRequest,
+    background_tasks: BackgroundTasks,
+    api_key: str = Depends(verify_api_key),
+):
     """
     Start transcription from a direct audio URL.
 
-    Returns a job_id to poll for status.
+    Returns a job_id to poll for status. If callback_url is provided, a POST
+    request will be sent to it when the job completes or fails.
     """
     cleanup_old_jobs()
 
@@ -186,17 +222,26 @@ async def transcribe_from_url(req: TranscribeURLRequest, api_key: str = Depends(
         "status": "running",
         "type": "url",
         "input": req.url,
+        "callback_url": req.callback_url,
     }
+
+    if req.callback_url:
+        background_tasks.add_task(_watch_and_callback, job_id, call, req.callback_url)
 
     return JobResponse(job_id=job_id, status="running")
 
 
 @web_app.post("/api/transcribe/rss", response_model=JobResponse)
-async def transcribe_from_rss(req: TranscribeRSSRequest, api_key: str = Depends(verify_api_key)):
+async def transcribe_from_rss(
+    req: TranscribeRSSRequest,
+    background_tasks: BackgroundTasks,
+    api_key: str = Depends(verify_api_key),
+):
     """
     Start transcription from an RSS feed (latest or specified episode).
 
-    Returns a job_id to poll for status.
+    Returns a job_id to poll for status. If callback_url is provided, a POST
+    request will be sent to it when the job completes or fails.
     """
     cleanup_old_jobs()
 
@@ -222,7 +267,11 @@ async def transcribe_from_rss(req: TranscribeRSSRequest, api_key: str = Depends(
         "status": "running",
         "type": "rss",
         "input": req.rss_url,
+        "callback_url": req.callback_url,
     }
+
+    if req.callback_url:
+        background_tasks.add_task(_watch_and_callback, job_id, call, req.callback_url)
 
     return JobResponse(job_id=job_id, status="running")
 

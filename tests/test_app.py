@@ -6,7 +6,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from unittest.mock import ANY, MagicMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
@@ -846,3 +846,125 @@ class TestPlayerHTMLRoutes:
         """/player/{job_id} is accessible without auth."""
         resp = TestClient(web_app, raise_server_exceptions=False).get("/player/some-uuid")
         assert resp.status_code != 403
+
+
+class TestWebhookCallback:
+    """callback_url — fire a POST when the job finishes."""
+
+    def test_callback_url_stored_in_job(self, client, mock_fn):
+        """callback_url is persisted in the in-memory job entry."""
+        resp = client.post(
+            "/api/transcribe/url",
+            json={"url": "https://example.com/ep.mp3", "callback_url": "https://hook.example.com/done"},
+            headers=AUTH,
+        )
+        job_id = resp.json()["job_id"]
+        assert jobs[job_id]["callback_url"] == "https://hook.example.com/done"
+
+    def test_no_callback_url_stored_as_none(self, client, mock_fn):
+        """Omitting callback_url stores None (no webhook will fire)."""
+        resp = client.post(
+            "/api/transcribe/url",
+            json={"url": "https://example.com/ep.mp3"},
+            headers=AUTH,
+        )
+        job_id = resp.json()["job_id"]
+        assert jobs[job_id]["callback_url"] is None
+
+    def test_rss_callback_url_stored_in_job(self, client, mock_fn):
+        """callback_url also works for the RSS endpoint."""
+        resp = client.post(
+            "/api/transcribe/rss",
+            json={"rss_url": "https://example.com/feed.xml", "callback_url": "https://hook.example.com/done"},
+            headers=AUTH,
+        )
+        job_id = resp.json()["job_id"]
+        assert jobs[job_id]["callback_url"] == "https://hook.example.com/done"
+
+
+class TestWatchAndCallback:
+    """_watch_and_callback() — unit tests for the webhook delivery coroutine."""
+
+    @pytest.mark.asyncio
+    async def test_posts_completed_payload_on_success(self):
+        """On a successful job, POSTs status=completed with the result."""
+        import httpx
+        from app import _watch_and_callback
+
+        result = {"segments": [], "language": "zh"}
+        mock_call = Mock()
+        mock_call.get.return_value = result
+
+        job_id = str(uuid.uuid4())
+        jobs[job_id] = {"status": "running"}
+
+        posted = []
+
+        async def fake_post(url, json=None, **kwargs):
+            posted.append((url, json))
+            return Mock(status_code=200)
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = fake_post
+
+        with patch("app.asyncio.to_thread", new=AsyncMock(return_value=result)):
+            with patch("httpx.AsyncClient", return_value=mock_client):
+                await _watch_and_callback(job_id, mock_call, "https://hook.example.com/done")
+
+        assert jobs[job_id]["status"] == "completed"
+        assert len(posted) == 1
+        url, payload = posted[0]
+        assert url == "https://hook.example.com/done"
+        assert payload["job_id"] == job_id
+        assert payload["status"] == "completed"
+        assert payload["result"] == result
+
+    @pytest.mark.asyncio
+    async def test_posts_error_payload_on_failure(self):
+        """On a failed job, POSTs status=error with the error message."""
+        from app import _watch_and_callback
+
+        job_id = str(uuid.uuid4())
+        jobs[job_id] = {"status": "running"}
+
+        posted = []
+
+        async def fake_post(url, json=None, **kwargs):
+            posted.append((url, json))
+            return Mock(status_code=200)
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = fake_post
+
+        with patch("app.asyncio.to_thread", new=AsyncMock(side_effect=RuntimeError("GPU OOM"))):
+            with patch("httpx.AsyncClient", return_value=mock_client):
+                await _watch_and_callback(job_id, Mock(), "https://hook.example.com/done")
+
+        assert jobs[job_id]["status"] == "error"
+        assert jobs[job_id]["error"] == "GPU OOM"
+        url, payload = posted[0]
+        assert payload["status"] == "error"
+        assert payload["error"] == "GPU OOM"
+
+    @pytest.mark.asyncio
+    async def test_webhook_delivery_failure_does_not_raise(self):
+        """A network error sending the webhook is swallowed (logged, not raised)."""
+        from app import _watch_and_callback
+
+        result = {"segments": [], "language": "zh"}
+        job_id = str(uuid.uuid4())
+        jobs[job_id] = {"status": "running"}
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(side_effect=ConnectionError("timeout"))
+
+        with patch("app.asyncio.to_thread", new=AsyncMock(return_value=result)):
+            with patch("httpx.AsyncClient", return_value=mock_client):
+                # Should not raise
+                await _watch_and_callback(job_id, Mock(), "https://hook.example.com/done")
