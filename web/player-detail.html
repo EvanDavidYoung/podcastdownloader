@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transcript Player</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+        }
+
+        h1 {
+            text-align: center;
+            color: #fff;
+            margin-bottom: 8px;
+        }
+
+        .back-link {
+            display: inline-block;
+            color: #6c63ff;
+            text-decoration: none;
+            font-size: 14px;
+            margin-bottom: 20px;
+        }
+
+        .back-link:hover { text-decoration: underline; }
+
+        .episode-title {
+            text-align: center;
+            color: #aaa;
+            font-size: 15px;
+            margin-bottom: 24px;
+        }
+
+        .loading {
+            text-align: center;
+            color: #888;
+            padding: 60px;
+        }
+
+        .error {
+            text-align: center;
+            color: #ff6b6b;
+            padding: 40px;
+        }
+
+        .player-container {
+            background: #252542;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        audio {
+            width: 100%;
+            margin-bottom: 15px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        button {
+            background: #6c63ff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.2s;
+        }
+
+        button:hover { background: #5a52d5; }
+
+        .speed-control {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-left: auto;
+        }
+
+        .speed-control label {
+            color: #aaa;
+            font-size: 14px;
+        }
+
+        .speed-control select {
+            background: #3a3a5a;
+            color: #eee;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        .transcript-container {
+            background: #252542;
+            border-radius: 12px;
+            padding: 20px;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+
+        .segment {
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #3a3a5a;
+            border-left: 3px solid transparent;
+            padding-left: 10px;
+        }
+
+        .segment:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+        }
+
+        .segment-time {
+            font-size: 12px;
+            color: #6c63ff;
+            margin-bottom: 8px;
+            font-family: monospace;
+        }
+
+        .segment-text {
+            line-height: 1.8;
+        }
+
+        .word {
+            display: inline;
+            padding: 2px 1px;
+            border-radius: 3px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .word:hover { background: #3a3a5a; }
+
+        .word.active {
+            background: #6c63ff;
+            color: white;
+        }
+
+        .word.low-confidence {
+            border-bottom: 2px dotted #ff6b6b;
+        }
+
+        .legend {
+            display: flex;
+            gap: 20px;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #3a3a5a;
+            font-size: 13px;
+            color: #888;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .legend-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+        }
+
+        .legend-dot.active { background: #6c63ff; }
+
+        .legend-dot.low {
+            background: transparent;
+            border-bottom: 2px dotted #ff6b6b;
+            height: 0;
+            width: 20px;
+        }
+
+        .confidence-toggle {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .confidence-toggle input { cursor: pointer; }
+
+        .confidence-toggle label {
+            color: #aaa;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .current-word-display {
+            text-align: center;
+            font-size: 24px;
+            padding: 15px;
+            background: #1a1a2e;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            min-height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .time-display {
+            font-family: monospace;
+            color: #6c63ff;
+            font-size: 14px;
+        }
+
+        .speaker-badge {
+            display: inline-block;
+            padding: 1px 7px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 600;
+            margin-left: 8px;
+            letter-spacing: 0.5px;
+        }
+
+        .speaker-legend {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #3a3a5a;
+        }
+
+        .speaker-legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .speaker-legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        .transcript-container::-webkit-scrollbar { width: 8px; }
+        .transcript-container::-webkit-scrollbar-track { background: #1a1a2e; border-radius: 4px; }
+        .transcript-container::-webkit-scrollbar-thumb { background: #4a4a6a; border-radius: 4px; }
+        .transcript-container::-webkit-scrollbar-thumb:hover { background: #6c63ff; }
+    </style>
+</head>
+<body>
+    <a class="back-link" href="/player">&#8592; All episodes</a>
+    <h1>Transcript Player</h1>
+    <div class="episode-title" id="episodeTitle"></div>
+
+    <div id="loadingState" class="loading">Loading transcript...</div>
+
+    <div id="mainContent" style="display:none">
+        <div class="player-container">
+            <div class="current-word-display" id="currentWordDisplay">
+                <span class="time-display" id="timeDisplay">0:00 / 0:00</span>
+            </div>
+            <audio id="audioPlayer" controls></audio>
+            <div class="controls">
+                <button id="playPauseBtn">Play</button>
+                <button id="rewindBtn">-5s</button>
+                <button id="forwardBtn">+5s</button>
+                <div class="confidence-toggle">
+                    <input type="checkbox" id="showLowConfidence" checked>
+                    <label for="showLowConfidence">Highlight low confidence</label>
+                </div>
+                <div class="speed-control">
+                    <label>Speed:</label>
+                    <select id="speedSelect">
+                        <option value="0.5">0.5x</option>
+                        <option value="0.75">0.75x</option>
+                        <option value="1" selected>1x</option>
+                        <option value="1.25">1.25x</option>
+                        <option value="1.5">1.5x</option>
+                        <option value="2">2x</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <div class="transcript-container">
+            <div id="speakerLegend" class="speaker-legend" style="display:none"></div>
+            <div id="transcriptContent"></div>
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-dot active"></div>
+                    <span>Currently playing</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-dot low"></div>
+                    <span>Low confidence (&lt;0.5)</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Extract job_id from URL path: /player/{job_id}
+        const jobId = window.location.pathname.split('/').filter(Boolean).pop();
+
+        // State
+        let allWords = [];
+        const SPEAKER_COLORS = ['#6c63ff','#ff6b6b','#48c774','#ffdd57','#3273dc','#ff8c00','#ff69b4','#00d1b2'];
+        let speakerColors = {};
+
+        function buildSpeakerColors(segments) {
+            const speakers = [...new Set(segments.map(s => s.speaker).filter(Boolean))].sort();
+            speakerColors = {};
+            speakers.forEach((speaker, i) => {
+                speakerColors[speaker] = SPEAKER_COLORS[i % SPEAKER_COLORS.length];
+            });
+            return speakers.length > 0;
+        }
+
+        // DOM elements
+        const audioPlayer = document.getElementById('audioPlayer');
+        const playPauseBtn = document.getElementById('playPauseBtn');
+        const rewindBtn = document.getElementById('rewindBtn');
+        const forwardBtn = document.getElementById('forwardBtn');
+        const speedSelect = document.getElementById('speedSelect');
+        const showLowConfidence = document.getElementById('showLowConfidence');
+        const currentWordDisplay = document.getElementById('currentWordDisplay');
+        const timeDisplay = document.getElementById('timeDisplay');
+        const transcriptContent = document.getElementById('transcriptContent');
+
+        function formatTime(seconds) {
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        }
+
+        function renderTranscript(data) {
+            if (!data || !data.segments) return;
+
+            allWords = [];
+            const hasDiarization = buildSpeakerColors(data.segments);
+
+            const legendEl = document.getElementById('speakerLegend');
+            if (hasDiarization) {
+                legendEl.innerHTML = Object.entries(speakerColors).map(([speaker, color]) =>
+                    `<div class="speaker-legend-item">
+                        <div class="speaker-legend-dot" style="background:${color}"></div>
+                        <span style="color:${color}">${speaker}</span>
+                    </div>`
+                ).join('');
+                legendEl.style.display = 'flex';
+            } else {
+                legendEl.style.display = 'none';
+            }
+
+            let html = '';
+            data.segments.forEach((segment) => {
+                const color = segment.speaker ? speakerColors[segment.speaker] : null;
+                const borderStyle = color ? `style="border-left-color:${color}"` : '';
+                html += `<div class="segment" ${borderStyle}>`;
+                let timeHtml = `${formatTime(segment.start)} - ${formatTime(segment.end)}`;
+                if (color) {
+                    timeHtml += ` <span class="speaker-badge" style="background:${color}22;color:${color};border:1px solid ${color}55">${segment.speaker}</span>`;
+                }
+                html += `<div class="segment-time">${timeHtml}</div>`;
+                html += `<div class="segment-text">`;
+
+                if (segment.words) {
+                    segment.words.forEach((word) => {
+                        const globalIdx = allWords.length;
+                        allWords.push(word);
+                        const lowConf = word.score < 0.5 ? 'low-confidence' : '';
+                        html += `<span class="word ${lowConf}" data-idx="${globalIdx}" data-start="${word.start}" data-end="${word.end}">${word.word}</span>`;
+                    });
+                } else {
+                    html += segment.text;
+                }
+
+                html += `</div></div>`;
+            });
+
+            transcriptContent.innerHTML = html;
+
+            document.querySelectorAll('.word').forEach(el => {
+                el.addEventListener('click', () => {
+                    const start = parseFloat(el.dataset.start);
+                    audioPlayer.currentTime = start;
+                    if (audioPlayer.paused) audioPlayer.play();
+                });
+            });
+
+            updateLowConfidenceDisplay();
+        }
+
+        function updateLowConfidenceDisplay() {
+            const show = showLowConfidence.checked;
+            document.querySelectorAll('.word.low-confidence').forEach(el => {
+                el.style.borderBottom = show ? '2px dotted #ff6b6b' : 'none';
+            });
+        }
+
+        showLowConfidence.addEventListener('change', updateLowConfidenceDisplay);
+
+        playPauseBtn.addEventListener('click', () => {
+            if (audioPlayer.paused) { audioPlayer.play(); } else { audioPlayer.pause(); }
+        });
+
+        rewindBtn.addEventListener('click', () => {
+            audioPlayer.currentTime = Math.max(0, audioPlayer.currentTime - 5);
+        });
+
+        forwardBtn.addEventListener('click', () => {
+            audioPlayer.currentTime = Math.min(audioPlayer.duration, audioPlayer.currentTime + 5);
+        });
+
+        speedSelect.addEventListener('change', () => {
+            audioPlayer.playbackRate = parseFloat(speedSelect.value);
+        });
+
+        audioPlayer.addEventListener('play', () => { playPauseBtn.textContent = 'Pause'; });
+        audioPlayer.addEventListener('pause', () => { playPauseBtn.textContent = 'Play'; });
+
+        audioPlayer.addEventListener('timeupdate', () => {
+            const currentTime = audioPlayer.currentTime;
+            const duration = audioPlayer.duration || 0;
+            timeDisplay.textContent = `${formatTime(currentTime)} / ${formatTime(duration)}`;
+
+            document.querySelectorAll('.word.active').forEach(el => el.classList.remove('active'));
+
+            let currentWord = null;
+            for (let i = 0; i < allWords.length; i++) {
+                const word = allWords[i];
+                if (currentTime >= word.start && currentTime <= word.end) {
+                    currentWord = word;
+                    const el = document.querySelector(`.word[data-idx="${i}"]`);
+                    if (el) {
+                        el.classList.add('active');
+                        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                    break;
+                }
+            }
+
+            if (currentWord) {
+                currentWordDisplay.innerHTML = `<span style="font-size: 32px;">${currentWord.word}</span>`;
+            }
+        });
+
+        audioPlayer.addEventListener('loadedmetadata', () => {
+            timeDisplay.textContent = `0:00 / ${formatTime(audioPlayer.duration)}`;
+        });
+
+        async function init() {
+            const loadingState = document.getElementById('loadingState');
+            const mainContent = document.getElementById('mainContent');
+
+            if (!jobId) {
+                loadingState.className = 'error';
+                loadingState.textContent = 'No job ID found in URL.';
+                return;
+            }
+
+            try {
+                const resp = await fetch(`/api/player/transcript/${jobId}`);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+                const data = await resp.json();
+
+                // Set episode title if available
+                const episodeTitleEl = document.getElementById('episodeTitle');
+                if (data.episode_title) {
+                    episodeTitleEl.textContent = data.episode_title;
+                    document.title = data.episode_title;
+                }
+
+                // Point audio at the API endpoint (HTML5 audio streams from URL)
+                audioPlayer.src = `/api/player/audio/${jobId}`;
+
+                // Render transcript
+                renderTranscript(data);
+
+                // Show the player
+                loadingState.style.display = 'none';
+                mainContent.style.display = 'block';
+            } catch (err) {
+                loadingState.className = 'error';
+                loadingState.textContent = 'Failed to load transcript: ' + err.message;
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>
