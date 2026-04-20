@@ -51,7 +51,7 @@ jobs_volume = modal.Volume.from_name("podcast-jobs", create_if_missing=True)
 # ---------------------
 
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, Form, BackgroundTasks
-from fastapi.responses import JSONResponse, Response, StreamingResponse, FileResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse, FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -371,7 +371,7 @@ async def list_jobs(api_key: str = Depends(verify_api_key)):
 
 
 @web_app.get("/api/player/jobs")
-async def list_player_jobs():
+async def list_player_jobs(api_key: str = Depends(verify_api_key)):
     """List all completed jobs from persistent volume, sorted newest first."""
     jobs_volume.reload()
     jobs_dir = Path("/jobs")
@@ -409,6 +409,17 @@ async def get_player_audio(job_id: str):
             yield from f
 
     return StreamingResponse(iterfile(), media_type="audio/mpeg")
+
+
+@web_app.get("/")
+async def landing_page():
+    """Landing page."""
+    return FileResponse("/web/index.html")
+
+
+@web_app.get("/player.html")
+async def player_html_redirect():
+    return RedirectResponse(url="/player", status_code=301)
 
 
 @web_app.get("/player")
