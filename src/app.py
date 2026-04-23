@@ -114,6 +114,7 @@ class TranscribeURLRequest(BaseModel):
 class TranscribeRSSRequest(BaseModel):
     rss_url: str
     episode_index: int = 0
+    episode_title: Optional[str] = None
     language: str = "zh"
     merge_words: bool = True
     to_traditional: bool = False
@@ -162,7 +163,7 @@ async def _watch_and_callback(job_id: str, call, callback_url: str):
         result = await asyncio.to_thread(call.get, timeout=JOB_TTL_SECONDS)
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["result"] = result
-        payload = {"job_id": job_id, "status": "completed", "result": result}
+        payload = {"job_id": job_id, "status": "completed", "transcript": result}
     except Exception as e:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
@@ -255,6 +256,7 @@ async def transcribe_from_rss(
     call = transcribe_fn.spawn(
         rss_url=req.rss_url,
         episode_index=req.episode_index,
+        episode_title=req.episode_title,
         language=req.language,
         merge_words=req.merge_words,
         to_traditional=req.to_traditional,
