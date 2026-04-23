@@ -293,6 +293,7 @@ def transcribe_from_url(
 def transcribe_from_rss(
     rss_url: str,
     episode_index: int = 0,
+    episode_title: str = None,
     language: str = "zh",
     merge_words: bool = True,
     to_traditional: bool = False,
@@ -312,7 +313,23 @@ def transcribe_from_rss(
     if not feed.entries:
         raise ValueError("No episodes found in feed")
 
-    episode = feed.entries[episode_index]
+    if episode_title:
+        query = episode_title.lower()
+        # Prefer substring match, fall back to best word-overlap score
+        episode = next(
+            (e for e in feed.entries if query in e.get("title", "").lower()),
+            None,
+        )
+        if episode is None:
+            query_words = set(query.split())
+            episode = max(
+                feed.entries,
+                key=lambda e: len(query_words & set(e.get("title", "").lower().split())),
+            )
+        print(f"Title search '{episode_title}' matched: {episode.get('title')}")
+    else:
+        episode = feed.entries[episode_index]
+
     title = episode.get("title", "Unknown")
     print(f"Episode: {title}")
 

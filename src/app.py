@@ -51,7 +51,7 @@ jobs_volume = modal.Volume.from_name("podcast-jobs", create_if_missing=True)
 # ---------------------
 
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, Form, BackgroundTasks
-from fastapi.responses import JSONResponse, Response, StreamingResponse, FileResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse, FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -114,6 +114,7 @@ class TranscribeURLRequest(BaseModel):
 class TranscribeRSSRequest(BaseModel):
     rss_url: str
     episode_index: int = 0
+    episode_title: Optional[str] = None
     language: str = "zh"
     merge_words: bool = True
     to_traditional: bool = False
@@ -162,7 +163,7 @@ async def _watch_and_callback(job_id: str, call, callback_url: str):
         result = await asyncio.to_thread(call.get, timeout=JOB_TTL_SECONDS)
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["result"] = result
-        payload = {"job_id": job_id, "status": "completed", "result": result}
+        payload = {"job_id": job_id, "status": "completed", "transcript": result}
     except Exception as e:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
@@ -255,6 +256,7 @@ async def transcribe_from_rss(
     call = transcribe_fn.spawn(
         rss_url=req.rss_url,
         episode_index=req.episode_index,
+        episode_title=req.episode_title,
         language=req.language,
         merge_words=req.merge_words,
         to_traditional=req.to_traditional,
@@ -371,7 +373,7 @@ async def list_jobs(api_key: str = Depends(verify_api_key)):
 
 
 @web_app.get("/api/player/jobs")
-async def list_player_jobs():
+async def list_player_jobs(api_key: str = Depends(verify_api_key)):
     """List all completed jobs from persistent volume, sorted newest first."""
     jobs_volume.reload()
     jobs_dir = Path("/jobs")
@@ -409,6 +411,17 @@ async def get_player_audio(job_id: str):
             yield from f
 
     return StreamingResponse(iterfile(), media_type="audio/mpeg")
+
+
+@web_app.get("/")
+async def landing_page():
+    """Landing page."""
+    return FileResponse("/web/index.html")
+
+
+@web_app.get("/player.html")
+async def player_html_redirect():
+    return RedirectResponse(url="/player", status_code=301)
 
 
 @web_app.get("/player")

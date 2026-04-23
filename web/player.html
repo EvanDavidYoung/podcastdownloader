@@ -111,19 +111,124 @@
             font-size: 20px;
             margin-top: -2px;
         }
+
+        .auth-gate {
+            background: #252542;
+            border-radius: 12px;
+            padding: 32px;
+            max-width: 420px;
+            margin: 60px auto 0;
+            text-align: center;
+        }
+
+        .auth-gate h2 {
+            font-size: 18px;
+            margin-bottom: 8px;
+            color: #fff;
+        }
+
+        .auth-gate p {
+            font-size: 14px;
+            color: #888;
+            margin-bottom: 24px;
+        }
+
+        .auth-gate input {
+            width: 100%;
+            background: #1a1a2e;
+            border: 1px solid #3a3a5a;
+            color: #eee;
+            padding: 12px 14px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-family: monospace;
+            margin-bottom: 12px;
+            outline: none;
+        }
+
+        .auth-gate input:focus { border-color: #6c63ff; }
+
+        .auth-gate button {
+            width: 100%;
+            background: #6c63ff;
+            color: #fff;
+            border: none;
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .auth-gate button:hover { background: #5a52d5; }
+
+        .auth-error {
+            color: #ff6b6b;
+            font-size: 13px;
+            margin-top: 10px;
+        }
+
+        .sign-out {
+            float: right;
+            font-size: 13px;
+            color: #666;
+            cursor: pointer;
+            background: none;
+            border: none;
+            padding: 0;
+            text-decoration: underline;
+        }
+
+        .sign-out:hover { color: #aaa; }
     </style>
 </head>
 <body>
     <h1>Podcast Player</h1>
     <p class="subtitle">Completed transcription jobs</p>
 
-    <div id="content" class="loading">Loading jobs...</div>
+    <div id="authGate" class="auth-gate" style="display:none">
+        <h2>Enter API Key</h2>
+        <p>Paste your bearer token to view completed jobs.</p>
+        <input type="password" id="keyInput" placeholder="Bearer token" autocomplete="off" />
+        <button onclick="submitKey()">Continue</button>
+        <div id="authError" class="auth-error" style="display:none"></div>
+    </div>
+
+    <div id="content" class="loading" style="display:none">Loading jobs...</div>
 
     <script>
-        async function loadJobs() {
+        const STORAGE_KEY = 'podcast_api_key';
+
+        function getKey() { return localStorage.getItem(STORAGE_KEY); }
+
+        function submitKey() {
+            const val = document.getElementById('keyInput').value.trim();
+            if (!val) return;
+            localStorage.setItem(STORAGE_KEY, val);
+            document.getElementById('authGate').style.display = 'none';
+            loadJobs(val);
+        }
+
+        document.getElementById('keyInput').addEventListener('keydown', e => {
+            if (e.key === 'Enter') submitKey();
+        });
+
+        async function loadJobs(apiKey) {
             const content = document.getElementById('content');
+            content.style.display = 'block';
+            content.className = 'loading';
+            content.textContent = 'Loading jobs...';
             try {
-                const resp = await fetch('/api/player/jobs');
+                const resp = await fetch('/api/player/jobs', {
+                    headers: { 'Authorization': `Bearer ${apiKey}` }
+                });
+                if (resp.status === 401 || resp.status === 403) {
+                    localStorage.removeItem(STORAGE_KEY);
+                    content.style.display = 'none';
+                    showAuthGate('Invalid API key.');
+                    return;
+                }
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 const data = await resp.json();
 
@@ -134,7 +239,7 @@
                 }
 
                 content.className = 'job-list';
-                content.innerHTML = data.jobs.map(job => {
+                content.innerHTML = `<button class="sign-out" onclick="signOut()">Sign out</button>` + data.jobs.map(job => {
                     const date = new Date(job.created_at).toLocaleString();
                     const title = job.title || job.job_id;
                     const typeLabel = job.type || 'unknown';
@@ -156,6 +261,24 @@
             }
         }
 
+        function showAuthGate(errorMsg) {
+            const gate = document.getElementById('authGate');
+            gate.style.display = 'block';
+            const errEl = document.getElementById('authError');
+            if (errorMsg) {
+                errEl.textContent = errorMsg;
+                errEl.style.display = 'block';
+            } else {
+                errEl.style.display = 'none';
+            }
+        }
+
+        function signOut() {
+            localStorage.removeItem(STORAGE_KEY);
+            document.getElementById('content').style.display = 'none';
+            showAuthGate();
+        }
+
         function escapeHtml(str) {
             return String(str)
                 .replace(/&/g, '&amp;')
@@ -164,7 +287,13 @@
                 .replace(/"/g, '&quot;');
         }
 
-        loadJobs();
+        // On load: use stored key or show gate
+        const storedKey = getKey();
+        if (storedKey) {
+            loadJobs(storedKey);
+        } else {
+            showAuthGate();
+        }
     </script>
 </body>
 </html>
