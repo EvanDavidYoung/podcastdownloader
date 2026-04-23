@@ -66,14 +66,24 @@ cp .env.example .env
 
 ## Backend API
 
-FastAPI server deployed on Modal:
+There are two separate Modal apps that must both be deployed:
+
+| App | File | What it does |
+|---|---|---|
+| `podcast-transcriber` | `scripts/modal/transcribe_modal.py` | GPU transcription worker |
+| `podcast-web` | `src/app.py` | FastAPI web API |
+
+`podcast-web` calls `modal.Function.from_name("podcast-transcriber", ...)` at runtime, so **`transcribe_modal.py` must be deployed first** and redeployed any time its function signatures change.
 
 ```bash
-# Dev mode (hot reload)
-modal serve src/app.py
+# Deploy transcription worker first
+modal deploy scripts/modal/transcribe_modal.py
 
-# Production deploy
+# Then deploy the web API
 modal deploy src/app.py
+
+# Dev mode for the web API (hot reload)
+modal serve src/app.py
 ```
 
 Authentication uses `Authorization: Bearer <key>`. Keys are stored in the Modal `api-auth` secret (`API_KEY` and `SLACK_BOT_API_KEY`).
