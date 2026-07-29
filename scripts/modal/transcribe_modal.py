@@ -229,6 +229,179 @@ def convert_to_traditional(data: dict, config: str = 's2t') -> dict:
     return data
 
 
+def parse_silence_intervals(ffmpeg_stderr: str) -> list:
+    """Parse ffmpeg silencedetect filter output into a list of (silence_start, silence_end)."""
+    starts, ends = [], []
+    for line in ffmpeg_stderr.splitlines():
+        if "silence_start:" in line:
+            starts.append(float(line.split("silence_start:")[1].strip()))
+        elif "silence_end:" in line:
+            ends.append(float(line.split("silence_end:")[1].split("|")[0].strip()))
+    if len(starts) != len(ends):
+        starts = starts[: len(ends)]
+    return list(zip(starts, ends))
+
+
+def speech_intervals_from_silence(silence_intervals: list, total_duration: float, min_speech: float = 0.15) -> list:
+    """Invert silence intervals against total duration to get speech intervals."""
+    speech = []
+    cursor = 0.0
+    for s, e in silence_intervals:
+        if s > cursor:
+            speech.append((cursor, s))
+        cursor = e
+    if cursor < total_duration:
+        speech.append((cursor, total_duration))
+    return [(s, e) for s, e in speech if e - s > min_speech]
+
+
+def merge_speech_intervals(speech_intervals: list, merge_silence_max: float = 1.2, max_chunk_sec: float = 25.0) -> list:
+    """Bridge speech intervals separated by a short pause, capped at max_chunk_sec so
+    language auto-detection stays granular enough to catch a real speaker/language switch."""
+    if not speech_intervals:
+        return []
+    merged = [speech_intervals[0]]
+    for s, e in speech_intervals[1:]:
+        cur_s, cur_e = merged[-1]
+        gap = s - cur_e
+        if gap <= merge_silence_max and (e - cur_s) <= max_chunk_sec:
+            merged[-1] = (cur_s, e)
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def detect_speech_chunks(
+    audio_path: str, noise_db: int = -30, min_silence: float = 0.5,
+    merge_silence_max: float = 1.2, max_chunk_sec: float = 25.0,
+) -> list:
+    """Run ffmpeg silencedetect and return merged (start, end) speech chunks."""
+    import subprocess
+
+    proc = subprocess.run(
+        ["ffmpeg", "-i", str(audio_path), "-af",
+         f"silencedetect=noise={noise_db}dB:d={min_silence}", "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    duration = float(subprocess.run(
+        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", str(audio_path)],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip())
+    silence = parse_silence_intervals(proc.stderr)
+    speech = speech_intervals_from_silence(silence, duration)
+    return merge_speech_intervals(speech, merge_silence_max, max_chunk_sec)
+
+
+@app.function(
+    gpu="T4",
+    timeout=1800,
+    volumes={MODEL_CACHE_PATH: model_cache},
+    secrets=[modal.Secret.from_name("huggingface", required_keys=["HF_TOKEN"])],
+)
+def transcribe_bilingual_audio(
+    audio_bytes: bytes,
+    filename: str = "audio.mp4",
+    align: bool = True,
+) -> dict:
+    """
+    Transcribe audio/video with per-segment language auto-detection, for recordings
+    that alternate languages within one track (e.g. a speaker + live interpreter).
+
+    Unlike transcribe_audio(), language is not forced -- the file is split into
+    speech chunks via silence detection, and WhisperX auto-detects language
+    independently for each chunk, so each segment is tagged with the language
+    actually spoken instead of one language forced across the whole file.
+
+    When align=True (default), each segment also gets word-level timestamps via
+    WhisperX's forced-alignment step (one align model loaded per language seen),
+    so callers can split a segment into sentence-length clips instead of being
+    stuck with chunk-length ones.
+
+    Returns dict with {"segments": [{"start", "end", "language", "text", "words"}, ...]}.
+    """
+    import tempfile
+    import os
+    import torch
+
+    _original_torch_load = torch.load
+    def _patched_torch_load(*args, **kwargs):
+        kwargs['weights_only'] = False
+        return _original_torch_load(*args, **kwargs)
+    torch.load = _patched_torch_load
+
+    import whisperx
+    from whisperx.audio import SAMPLE_RATE
+
+    os.environ["HF_HOME"] = MODEL_CACHE_PATH
+    os.environ["TORCH_HOME"] = MODEL_CACHE_PATH
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    compute_type = "float16" if device == "cuda" else "int8"
+    print(f"Using device: {device}, compute_type: {compute_type}")
+
+    with tempfile.NamedTemporaryFile(suffix=os.path.splitext(filename)[1], delete=False) as f:
+        f.write(audio_bytes)
+        audio_path = f.name
+
+    try:
+        print("Detecting speech chunks...")
+        chunks = detect_speech_chunks(audio_path)
+        print(f"{len(chunks)} chunks")
+
+        audio = whisperx.load_audio(audio_path)
+
+        print("Loading WhisperX model (auto language-detect mode)...")
+        # language=None keeps the pipeline in auto-detect mode; WhisperX resets its
+        # cached tokenizer after every transcribe() call when no language is preset,
+        # so each chunk below gets a fresh language-detection pass instead of reusing
+        # whatever was detected for the first chunk.
+        model = whisperx.load_model("large-v3", device, compute_type=compute_type, language=None, vad_method="silero")
+
+        segments = []
+        for i, (start, end) in enumerate(chunks):
+            s_idx, e_idx = int(start * SAMPLE_RATE), int(end * SAMPLE_RATE)
+            result = model.transcribe(audio[s_idx:e_idx], batch_size=16, language=None)
+            lang = result["language"]
+            for seg in result["segments"]:
+                text = seg["text"].strip()
+                if not text:
+                    continue
+                segments.append({
+                    "start": round(start + seg["start"], 3),
+                    "end": round(start + seg["end"], 3),
+                    "language": lang,
+                    "text": text,
+                })
+            print(f"[{i+1}/{len(chunks)}] {start:.1f}-{end:.1f}s lang={lang}")
+
+        if align:
+            print("Aligning for word-level timestamps...")
+            align_models = {}  # language -> (model, metadata), loaded lazily and reused
+            by_language = {}
+            for seg in segments:
+                by_language.setdefault(seg["language"], []).append(seg)
+
+            for lang, lang_segments in by_language.items():
+                if lang not in align_models:
+                    try:
+                        align_models[lang] = whisperx.load_align_model(language_code=lang, device=device)
+                    except Exception as e:
+                        print(f"No align model for '{lang}', skipping word timestamps for it: {e}")
+                        continue
+                model_a, metadata = align_models[lang]
+                aligned = whisperx.align(lang_segments, model_a, metadata, audio, device, return_char_alignments=False)
+                for orig, aligned_seg in zip(lang_segments, aligned["segments"]):
+                    orig["words"] = [
+                        {"word": w["word"], "start": w.get("start"), "end": w.get("end")}
+                        for w in aligned_seg.get("words", [])
+                    ]
+
+        return {"segments": segments}
+
+    finally:
+        os.unlink(audio_path)
+
+
 @app.function(
     gpu="T4",
     timeout=1800,
@@ -433,9 +606,28 @@ def main(
     to_traditional: bool = False,
     hf_token: str = None,
     output: str = None,
+    bilingual: bool = False,
 ):
-    """CLI entrypoint for running transcription."""
+    """CLI entrypoint for running transcription.
+
+    Pass --bilingual with --audio-path to auto-detect language per speech
+    segment instead of forcing --language across the whole file (for
+    recordings that alternate languages, e.g. a speaker + live interpreter).
+    """
     import json
+
+    if bilingual:
+        if not audio_path:
+            print("--bilingual currently requires --audio-path")
+            return
+        with open(audio_path, "rb") as f:
+            audio_bytes = f.read()
+        result = transcribe_bilingual_audio.remote(audio_bytes=audio_bytes, filename=audio_path)
+        output_path = output or "transcript.json"
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        print(f"Transcript saved to: {output_path}")
+        return
 
     if rss_url:
         result = transcribe_from_rss.remote(
