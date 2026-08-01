@@ -33,6 +33,10 @@ python scripts/local/transcribe_local.py
 # Cloud transcription via Modal (uses miniforge base)
 modal run scripts/modal/transcribe_modal.py --audio-path "downloads/episode.mp3"
 
+# --audio-url takes any yt-dlp-supported site, not just direct audio files.
+# --list-subs shows a URL's caption tracks; --subtitles reuses them (no GPU).
+modal run scripts/modal/transcribe_modal.py --audio-url "https://youtube.com/watch?v=..." --list-subs
+
 # Run the web API server (dev mode with hot reload)
 modal serve src/app.py
 
@@ -46,6 +50,11 @@ modal deploy src/app.py
 See [docs/architecture.md](docs/architecture.md) for full system documentation.
 
 **Pipeline**: Download → Transcribe → Post-Process → View
+
+Downloads resolve through yt-dlp unless the URL is already a plain audio file, so any of its ~1800
+supported sites works. When a site publishes its own captions they can be reused instead of running
+WhisperX — see the media-sources section of [README.md](README.md) for the tradeoffs and for the
+cookie setup that sites bot-checking Modal's IPs require.
 
 **Backend server** (in `src/`):
 - `app.py` - FastAPI web server deployed on Modal

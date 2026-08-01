@@ -8,8 +8,14 @@ Usage:
     # Authenticate (first time only)
     modal setup
 
-    # Run transcription on a URL
-    modal run scripts/modal/transcribe_modal.py --audio-url "https://example.com/podcast.mp3"
+    # Run transcription on a URL — any site yt-dlp supports, or a direct file
+    modal run scripts/modal/transcribe_modal.py --audio-url "https://youtube.com/watch?v=..."
+
+    # See which caption tracks a URL already offers
+    modal run scripts/modal/transcribe_modal.py --audio-url "..." --list-subs
+
+    # Reuse those captions instead of running WhisperX (no GPU)
+    modal run scripts/modal/transcribe_modal.py --audio-url "..." --subtitles --subtitle-langs en
 
     # Run on a local file (uploads to Modal)
     modal run scripts/modal/transcribe_modal.py --audio-path "./downloads/episode.mp3"
@@ -37,10 +43,19 @@ image = (
         "whisperx @ git+https://github.com/m-bain/whisperx.git",
         "feedparser",
         "requests",
+        "yt-dlp",
         "jieba",
         "opencc-python-reimplemented",
         "fastapi[standard]",
     )
+)
+
+# The CPU-only paths (probe, caption reuse) need none of the whisperx stack, so
+# they get their own image and cold-start in seconds instead of pulling torch.
+light_image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .apt_install("ffmpeg")
+    .pip_install("yt-dlp", "requests")
 )
 
 app = modal.App("podcast-transcriber", image=image)
@@ -738,6 +753,513 @@ def transcribe_diarized_bilingual(
         os.unlink(audio_path)
 
 
+# ---------------------
+# Media source resolution (yt-dlp)
+# ---------------------
+#
+# A URL that already points at an audio file is streamed directly. Anything
+# else — a YouTube/Vimeo/SoundCloud/Twitter page, a news article with an
+# embedded player, a bare .mp4 — is handed to yt-dlp, which extracts the audio
+# stream and transcodes it to mp3. yt-dlp also reports the site's subtitles and
+# auto-captions, so a job can reuse an existing transcript instead of paying
+# for GPU transcription.
+
+DIRECT_AUDIO_EXTENSIONS = (
+    ".mp3", ".m4a", ".m4b", ".aac", ".oga", ".ogg", ".opus", ".flac", ".wav", ".wma",
+)
+
+# Subtitle formats we can parse, best first. json3 carries per-word offsets;
+# vtt only does when the site emits inline <hh:mm:ss.mmm> cue tags (YouTube does).
+SUBTITLE_FORMAT_PREFERENCE = ("json3", "vtt", "srt")
+
+# Some CDNs serve podcast audio only to browser-shaped clients.
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+
+def looks_like_direct_audio(url: str, content_type: str = None) -> bool:
+    """True when a URL can be fetched with a plain GET instead of yt-dlp.
+
+    Video types deliberately return False — yt-dlp pulls just the audio stream
+    rather than making us ship a whole video file to the GPU.
+    """
+    import os
+    from urllib.parse import urlparse
+
+    if content_type:
+        main = content_type.split(";")[0].strip().lower()
+        if main.startswith("audio/") or main == "application/ogg":
+            return True
+        if main.startswith(("text/", "video/", "application/xml", "application/rss")):
+            return False
+        if main == "application/json":
+            return False
+
+    ext = os.path.splitext(urlparse(url).path)[1].lower()
+    return ext in DIRECT_AUDIO_EXTENSIONS
+
+
+def _timestamp_to_seconds(stamp: str) -> float:
+    """Parse HH:MM:SS.mmm / MM:SS.mmm / SRT's comma variant into seconds."""
+    parts = stamp.strip().replace(",", ".").split(":")
+    seconds = float(parts[-1])
+    if len(parts) > 1:
+        seconds += int(parts[-2]) * 60
+    if len(parts) > 2:
+        seconds += int(parts[-3]) * 3600
+    return seconds
+
+
+def _finalize_subtitle_transcript(segments: list, language: str = None) -> dict:
+    """Drop rolling-caption repeats, backfill open end times, build word_segments."""
+    cleaned = []
+    for segment in segments:
+        # Rolling captions re-emit the previous line verbatim before extending it.
+        if cleaned and cleaned[-1]["text"] == segment["text"]:
+            continue
+        cleaned.append(segment)
+
+    for i, segment in enumerate(cleaned):
+        next_start = cleaned[i + 1]["start"] if i + 1 < len(cleaned) else None
+        if segment.get("end") is None:
+            segment["end"] = next_start if next_start is not None else segment["start"]
+        # Rolling caption windows stay on screen into the next cue, so raw ends
+        # overlap the following start and word timings run backwards. Trim them
+        # back so the player can scan word_segments in order.
+        if next_start is not None and segment["end"] > next_start:
+            segment["end"] = next_start
+        for word in segment.get("words") or []:
+            end = segment["end"] if word.get("end") is None else min(word["end"], segment["end"])
+            word["end"] = max(end, word["start"])
+
+    return {
+        "segments": cleaned,
+        "word_segments": [w for s in cleaned for w in s.get("words") or []],
+        "language": language,
+    }
+
+
+def parse_json3_subtitles(data: dict, language: str = None) -> dict:
+    """Convert YouTube's json3 caption format into the transcript shape.
+
+    json3 gives a per-word `tOffsetMs` inside each event, which is what makes
+    it worth preferring over vtt for the word-synced player.
+    """
+    segments = []
+
+    for event in data.get("events") or []:
+        if event.get("aAppend"):
+            continue  # rolling-window repeat of the previous event
+        segs = event.get("segs")
+        start_ms = event.get("tStartMs")
+        if not segs or start_ms is None:
+            continue
+
+        start = start_ms / 1000.0
+        duration_ms = event.get("dDurationMs")
+        end = start + duration_ms / 1000.0 if duration_ms else None
+
+        text = "".join(seg.get("utf8", "") for seg in segs).strip()
+        if not text:
+            continue
+
+        # A lone seg is a whole caption line, not a word — only multi-seg events
+        # (auto-captions) carry real per-word offsets. Faking words from a line
+        # would hand the player one multi-second "word".
+        words = []
+        if len(segs) > 1:
+            for seg in segs:
+                piece = seg.get("utf8", "")
+                if not piece.strip():
+                    continue
+                words.append({
+                    "word": piece.strip(),
+                    "start": start + seg.get("tOffsetMs", 0) / 1000.0,
+                    "end": None,
+                })
+            for i, word in enumerate(words[:-1]):
+                word["end"] = words[i + 1]["start"]
+            if words:
+                words[-1]["end"] = end
+
+        segments.append({"start": start, "end": end, "text": text, "words": words})
+
+    return _finalize_subtitle_transcript(segments, language)
+
+
+def _parse_vtt_payload(payload: str, start: float, end: float) -> tuple:
+    """Split one cue body into (plain text, word list).
+
+    Words come back empty unless the cue carries inline <hh:mm:ss.mmm> timing
+    tags, which only some sources (YouTube auto-captions) emit.
+    """
+    import re
+
+    inline_time = re.compile(r"<(\d{1,2}:\d{2}:\d{2}[.,]\d{3})>")
+    tag = re.compile(r"</?[a-zA-Z][^>]*>")
+
+    plain = " ".join(tag.sub("", inline_time.sub("", payload)).split())
+    if not inline_time.search(payload):
+        return plain, []
+
+    words = []
+    word_start = start
+    # re.split with a capturing group alternates text, timestamp, text, ...
+    for index, part in enumerate(inline_time.split(payload)):
+        if index % 2:
+            word_start = _timestamp_to_seconds(part)
+            continue
+        token = " ".join(tag.sub("", part).split())
+        if token:
+            words.append({"word": token, "start": word_start, "end": None})
+
+    for i, word in enumerate(words[:-1]):
+        word["end"] = words[i + 1]["start"]
+    if words:
+        words[-1]["end"] = end
+
+    return plain, words
+
+
+def parse_vtt_subtitles(text: str, language: str = None) -> dict:
+    """Convert a WebVTT or SRT subtitle file into the transcript shape."""
+    import re
+
+    cue_timing = re.compile(
+        r"(\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3})\s*-->\s*(\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3})"
+    )
+
+    lines = text.replace("\r\n", "\n").split("\n")
+    segments = []
+    i = 0
+
+    while i < len(lines):
+        match = cue_timing.search(lines[i])
+        if not match:
+            i += 1
+            continue
+
+        start = _timestamp_to_seconds(match.group(1))
+        end = _timestamp_to_seconds(match.group(2))
+        i += 1
+
+        payload = []
+        while i < len(lines) and lines[i].strip():
+            payload.append(lines[i])
+            i += 1
+
+        if not payload:
+            continue
+        cue_text, words = _parse_vtt_payload("\n".join(payload), start, end)
+        if cue_text:
+            segments.append({"start": start, "end": end, "text": cue_text, "words": words})
+
+    # YouTube pairs each timed cue with an untimed duplicate of the same line;
+    # once any cue has word timings, the wordless ones are those duplicates.
+    if any(s["words"] for s in segments):
+        segments = [s for s in segments if s["words"]]
+
+    return _finalize_subtitle_transcript(segments, language)
+
+
+def parse_subtitle_data(raw, ext: str, language: str = None) -> dict:
+    """Dispatch raw subtitle bytes to the parser for its format."""
+    import json
+
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+
+    if ext == "json3":
+        return parse_json3_subtitles(json.loads(raw), language)
+    if ext in ("vtt", "srt"):
+        return parse_vtt_subtitles(raw, language)
+    raise ValueError(f"Unsupported subtitle format: {ext}")
+
+
+def _match_language(available, languages) -> str:
+    """Pick a track language, tolerating regional suffixes (en matches en-US)."""
+    available = list(available)
+    if not available:
+        return None
+    if not languages:
+        return available[0]
+
+    by_lower = {code.lower(): code for code in available}
+    for wanted in languages:
+        wanted = wanted.lower()
+        if wanted in by_lower:
+            return by_lower[wanted]
+        for code_lower, code in by_lower.items():
+            if code_lower.split("-")[0] == wanted.split("-")[0]:
+                return code
+    return None
+
+
+def _preferred_format(tracks: list) -> dict:
+    for ext in SUBTITLE_FORMAT_PREFERENCE:
+        for track in tracks:
+            if track.get("ext") == ext:
+                return track
+    return None
+
+
+def select_subtitle_track(info: dict, languages=None, allow_auto: bool = True):
+    """Choose the best subtitle track from a yt-dlp info dict.
+
+    Returns (language, kind, track) where kind is "subtitles" or
+    "automatic_captions", or None when nothing usable is available.
+    Human-authored subtitles always beat auto-captions.
+    """
+    if not languages and info.get("language"):
+        languages = [info["language"]]
+
+    sources = [("subtitles", info.get("subtitles") or {})]
+    if allow_auto:
+        sources.append(("automatic_captions", info.get("automatic_captions") or {}))
+
+    for kind, available in sources:
+        language = _match_language(available.keys(), languages)
+        if language is None:
+            continue
+        track = _preferred_format(available[language])
+        if track:
+            return language, kind, track
+    return None
+
+
+def _write_cookie_file(cookies_txt: str = None) -> str:
+    """Materialise Netscape-format cookies for yt-dlp; returns a path or None.
+
+    Falls back to the YTDLP_COOKIES env var (set it from a Modal secret) so
+    sites that bot-check datacenter IPs can still be reached.
+    """
+    import os
+    import tempfile
+
+    cookies_txt = cookies_txt or os.environ.get("YTDLP_COOKIES")
+    if not cookies_txt:
+        return None
+
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+        f.write(cookies_txt)
+        return f.name
+
+
+def _ytdl_options(cookies_path: str = None, extra: dict = None) -> dict:
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "http_headers": {"User-Agent": BROWSER_USER_AGENT},
+    }
+    if cookies_path:
+        options["cookiefile"] = cookies_path
+    if extra:
+        options.update(extra)
+    return options
+
+
+def probe_media(url: str, cookies_txt: str = None) -> dict:
+    """Return metadata and available caption languages without downloading."""
+    import os
+    import yt_dlp
+
+    cookies_path = _write_cookie_file(cookies_txt)
+    try:
+        with yt_dlp.YoutubeDL(_ytdl_options(cookies_path, {"skip_download": True})) as ydl:
+            info = ydl.extract_info(url, download=False)
+    finally:
+        if cookies_path:
+            os.unlink(cookies_path)
+
+    return {
+        "title": info.get("title"),
+        "extractor": info.get("extractor_key") or info.get("extractor"),
+        "duration": info.get("duration"),
+        "language": info.get("language"),
+        "webpage_url": info.get("webpage_url") or url,
+        "subtitles": sorted(info.get("subtitles") or {}),
+        "automatic_captions": sorted(info.get("automatic_captions") or {}),
+    }
+
+
+def fetch_subtitles(
+    url: str,
+    languages: list = None,
+    allow_auto: bool = True,
+    cookies_txt: str = None,
+) -> dict:
+    """Download an existing transcript for a URL, or None if the site has none.
+
+    Auto-captions are cheaper than WhisperX but noticeably worse: no reliable
+    punctuation, no diarization, no per-language handling for bilingual audio.
+    """
+    import os
+    import yt_dlp
+
+    cookies_path = _write_cookie_file(cookies_txt)
+    try:
+        with yt_dlp.YoutubeDL(_ytdl_options(cookies_path, {"skip_download": True})) as ydl:
+            info = ydl.extract_info(url, download=False)
+            selection = select_subtitle_track(info, languages, allow_auto)
+            if selection is None:
+                print(f"No usable subtitles for {url}")
+                return None
+            language, kind, track = selection
+            print(f"Using {kind} track '{language}' ({track.get('ext')})")
+            raw = ydl.urlopen(track["url"]).read()
+    finally:
+        if cookies_path:
+            os.unlink(cookies_path)
+
+    transcript = parse_subtitle_data(raw, track.get("ext"), language)
+    transcript["source"] = kind
+    transcript["subtitle_format"] = track.get("ext")
+    transcript["title"] = info.get("title")
+    return transcript
+
+
+def download_media(url: str, cookies_txt: str = None) -> dict:
+    """Fetch audio bytes for any URL.
+
+    Plain audio URLs are streamed with requests; everything else goes through
+    yt-dlp, which covers ~1800 sites plus a generic extractor for pages with an
+    embedded player, and transcodes whatever it finds to mp3.
+    """
+    import glob
+    import os
+    import shutil
+    import tempfile
+    from urllib.parse import urlparse
+
+    import requests
+    import yt_dlp
+
+    try:
+        response = requests.get(
+            url, timeout=300, stream=True, headers={"User-Agent": BROWSER_USER_AGENT}
+        )
+        response.raise_for_status()
+        if looks_like_direct_audio(url, response.headers.get("Content-Type")):
+            filename = os.path.basename(urlparse(url).path) or "audio.mp3"
+            print(f"Direct audio download: {filename}")
+            return {
+                "audio_bytes": response.content,
+                "filename": filename,
+                "title": filename,
+                "extractor": None,
+                "duration": None,
+                "webpage_url": url,
+                "source": "direct",
+            }
+        response.close()
+    except requests.RequestException as e:
+        print(f"Direct download failed ({e}); falling back to yt-dlp")
+
+    print(f"Extracting audio with yt-dlp: {url}")
+    cookies_path = _write_cookie_file(cookies_txt)
+    tmpdir = tempfile.mkdtemp()
+    try:
+        options = _ytdl_options(cookies_path, {
+            "format": "bestaudio/best",
+            "outtmpl": os.path.join(tmpdir, "%(id)s.%(ext)s"),
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "128",
+            }],
+        })
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=True)
+
+        produced = sorted(glob.glob(os.path.join(tmpdir, "*.mp3")))
+        if not produced:
+            raise RuntimeError(f"yt-dlp produced no audio file for {url}")
+
+        with open(produced[0], "rb") as f:
+            audio_bytes = f.read()
+
+        title = info.get("title") or os.path.basename(produced[0])
+        print(f"Extracted {len(audio_bytes) / 1e6:.1f} MB from '{title}'")
+        return {
+            "audio_bytes": audio_bytes,
+            "filename": os.path.basename(produced[0]),
+            "title": title,
+            "extractor": info.get("extractor_key") or info.get("extractor"),
+            "duration": info.get("duration"),
+            "webpage_url": info.get("webpage_url") or url,
+            "source": "yt-dlp",
+        }
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        if cookies_path:
+            os.unlink(cookies_path)
+
+
+def _save_job_artifacts(job_id: str, transcript: dict, audio_bytes: bytes, metadata: dict):
+    """Write transcript/audio/metadata for a job into the shared volume."""
+    import json
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    job_dir = Path(f"{JOBS_PATH}/{job_id}")
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "transcript.json").write_text(json.dumps(transcript, ensure_ascii=False))
+    if audio_bytes:
+        (job_dir / "audio.mp3").write_bytes(audio_bytes)
+    metadata = {
+        "job_id": job_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        **metadata,
+    }
+    (job_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False))
+    jobs_volume.commit()
+    print(f"Artifacts saved to volume at /jobs/{job_id}/")
+
+
+@app.function(image=light_image, timeout=300)
+def probe_url(url: str, cookies_txt: str = None) -> dict:
+    """Report title, duration and available caption languages for a URL."""
+    return probe_media(url, cookies_txt=cookies_txt)
+
+
+@app.function(image=light_image, timeout=1800, volumes={JOBS_PATH: jobs_volume})
+def fetch_transcript(
+    url: str,
+    languages: list = None,
+    allow_auto: bool = True,
+    cookies_txt: str = None,
+    job_id: str = None,
+) -> dict:
+    """Reuse a site's own subtitles instead of transcribing (no GPU).
+
+    Raises if the URL has no usable captions — call transcribe_from_url when
+    you want a WhisperX transcript regardless.
+    """
+    transcript = fetch_subtitles(
+        url, languages=languages, allow_auto=allow_auto, cookies_txt=cookies_txt
+    )
+    if transcript is None:
+        raise ValueError(f"No subtitles available for {url}")
+
+    if job_id:
+        # The player streams audio from the volume, so fetch it even though the
+        # transcript came from the site.
+        media = download_media(url, cookies_txt=cookies_txt)
+        _save_job_artifacts(job_id, transcript, media["audio_bytes"], {
+            "title": transcript.get("title") or media["title"],
+            "language": transcript.get("language"),
+            "type": "subtitles",
+            "input": url,
+            "source": transcript.get("source"),
+            "extractor": media.get("extractor"),
+        })
+
+    return transcript
+
+
 @app.function(
     gpu="T4",
     timeout=1800,
@@ -751,44 +1273,47 @@ def transcribe_from_url(
     to_traditional: bool = False,
     hf_token: str = None,
     job_id: str = None,
+    use_subtitles: bool = False,
+    subtitle_languages: list = None,
+    cookies_txt: str = None,
 ) -> dict:
-    """Download and transcribe audio from a URL."""
-    import json
-    import requests
-    from datetime import datetime, timezone
-    from pathlib import Path
+    """Download and transcribe audio from any URL yt-dlp can resolve.
 
-    print(f"Downloading from {url}...")
-    response = requests.get(url, timeout=300)
-    response.raise_for_status()
+    With use_subtitles, an existing transcript on the source site is used when
+    one exists and WhisperX only runs as a fallback. That short-circuit still
+    happens inside this GPU container; use fetch_transcript directly when you
+    know you only want captions.
+    """
+    result = None
+    if use_subtitles:
+        result = fetch_subtitles(
+            url, languages=subtitle_languages or [language], cookies_txt=cookies_txt
+        )
 
-    filename = url.split("/")[-1].split("?")[0] or "audio.mp3"
+    # Only pay for the download when there is something to transcribe, or when
+    # the job needs audio on the volume for the player to stream.
+    media = download_media(url, cookies_txt=cookies_txt) if result is None or job_id else None
 
-    result = transcribe_audio.local(
-        audio_bytes=response.content,
-        filename=filename,
-        language=language,
-        merge_words=merge_words,
-        to_traditional=to_traditional,
-        hf_token=hf_token,
-    )
+    if result is None:
+        result = transcribe_audio.local(
+            audio_bytes=media["audio_bytes"],
+            filename=media["filename"],
+            language=language,
+            merge_words=merge_words,
+            to_traditional=to_traditional,
+            hf_token=hf_token,
+        )
+        result["source"] = "whisperx"
 
     if job_id:
-        job_dir = Path(f"{JOBS_PATH}/{job_id}")
-        job_dir.mkdir(parents=True, exist_ok=True)
-        (job_dir / "transcript.json").write_text(json.dumps(result, ensure_ascii=False))
-        (job_dir / "audio.mp3").write_bytes(response.content)
-        metadata = {
-            "job_id": job_id,
-            "title": filename,
-            "language": language,
+        _save_job_artifacts(job_id, result, media["audio_bytes"], {
+            "title": media["title"],
+            "language": result.get("language") or language,
             "type": "url",
             "input": url,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        (job_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False))
-        jobs_volume.commit()
-        print(f"Artifacts saved to volume at /jobs/{job_id}/")
+            "source": result.get("source"),
+            "extractor": media.get("extractor"),
+        })
 
     return result
 
@@ -810,11 +1335,7 @@ def transcribe_from_rss(
     job_id: str = None,
 ) -> dict:
     """Download and transcribe the latest (or specified) episode from an RSS feed."""
-    import json
     import feedparser
-    import requests
-    from datetime import datetime, timezone
-    from pathlib import Path
 
     print(f"Fetching RSS feed: {rss_url}")
     feed = feedparser.parse(rss_url)
@@ -859,11 +1380,10 @@ def transcribe_from_rss(
         raise ValueError(f"No audio found for episode: {title}")
 
     print(f"Downloading: {audio_url}")
-    response = requests.get(audio_url, timeout=300)
-    response.raise_for_status()
+    media = download_media(audio_url)
 
     result = transcribe_audio.local(
-        audio_bytes=response.content,
+        audio_bytes=media["audio_bytes"],
         filename=f"{title}.mp3",
         language=language,
         merge_words=merge_words,
@@ -872,23 +1392,15 @@ def transcribe_from_rss(
     )
 
     result["episode_title"] = title
+    result["source"] = "whisperx"
 
     if job_id:
-        job_dir = Path(f"{JOBS_PATH}/{job_id}")
-        job_dir.mkdir(parents=True, exist_ok=True)
-        (job_dir / "transcript.json").write_text(json.dumps(result, ensure_ascii=False))
-        (job_dir / "audio.mp3").write_bytes(response.content)
-        metadata = {
-            "job_id": job_id,
+        _save_job_artifacts(job_id, result, media["audio_bytes"], {
             "title": title,
             "language": language,
             "type": "rss",
             "input": rss_url,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        (job_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False))
-        jobs_volume.commit()
-        print(f"Artifacts saved to volume at /jobs/{job_id}/")
+        })
 
     return result
 
@@ -907,10 +1419,12 @@ def transcribe_endpoint(request: dict) -> dict:
 
     POST body:
     {
-        "url": "https://example.com/audio.mp3",  // or "rss_url" for RSS feeds
+        "url": "https://youtube.com/watch?v=...",  // any yt-dlp-supported URL,
+                                                   // or "rss_url" for RSS feeds
         "language": "zh",
         "merge_words": true,
-        "to_traditional": false
+        "to_traditional": false,
+        "use_subtitles": false                     // reuse the site's captions
     }
     """
     if "rss_url" in request:
@@ -927,6 +1441,8 @@ def transcribe_endpoint(request: dict) -> dict:
             language=request.get("language", "zh"),
             merge_words=request.get("merge_words", True),
             to_traditional=request.get("to_traditional", False),
+            use_subtitles=request.get("use_subtitles", False),
+            subtitle_languages=request.get("subtitle_languages"),
         )
     else:
         return {"error": "Please provide 'url' or 'rss_url' in request body"}
@@ -947,8 +1463,20 @@ def main(
     num_speakers: int = None,
     output_dir: str = None,
     traditional: bool = True,
+    subtitles: bool = False,
+    subtitle_langs: str = None,
+    cookies: str = None,
+    list_subs: bool = False,
 ):
     """CLI entrypoint for running transcription.
+
+    --audio-url accepts anything yt-dlp can resolve (YouTube, Vimeo,
+    SoundCloud, a news page with an embedded player, a direct .mp3), not just
+    direct audio files. Pass --list-subs to see which caption tracks a URL
+    offers, or --subtitles to reuse them instead of running WhisperX.
+
+    Sites that bot-check datacenter IPs need browser cookies: export them in
+    Netscape format and pass --cookies cookies.txt.
 
     Pass --bilingual with --audio-path to auto-detect language per speech
     segment instead of forcing --language across the whole file (for
@@ -965,6 +1493,26 @@ def main(
     useful default here.
     """
     import json
+
+    cookies_txt = open(cookies, encoding="utf-8").read() if cookies else None
+    subtitle_languages = (
+        [code.strip() for code in subtitle_langs.split(",") if code.strip()]
+        if subtitle_langs
+        else None
+    )
+
+    if list_subs:
+        if not audio_url:
+            print("--list-subs requires --audio-url")
+            return
+        info = probe_url.remote(url=audio_url, cookies_txt=cookies_txt)
+        duration = f"{info['duration'] / 60:.1f} min" if info.get("duration") else "unknown"
+        print(f"{info['title']} — {info['extractor']}, {duration}")
+        print(f"  subtitles:          {', '.join(info['subtitles']) or 'none'}")
+        autos = info["automatic_captions"]
+        preview = ", ".join(autos[:12]) + (f", +{len(autos) - 12} more" if len(autos) > 12 else "")
+        print(f"  automatic captions: {preview or 'none'}")
+        return
 
     if diarized:
         if not audio_path:
@@ -1026,13 +1574,23 @@ def main(
             hf_token=hf_token,
         )
     elif audio_url:
-        result = transcribe_from_url.remote(
-            url=audio_url,
-            language=language,
-            merge_words=merge_words,
-            to_traditional=to_traditional,
-            hf_token=hf_token,
-        )
+        if subtitles:
+            # Captions only — no GPU, fails outright when the site has none.
+            result = fetch_transcript.remote(
+                url=audio_url,
+                languages=subtitle_languages or [language],
+                cookies_txt=cookies_txt,
+            )
+        else:
+            result = transcribe_from_url.remote(
+                url=audio_url,
+                language=language,
+                merge_words=merge_words,
+                to_traditional=to_traditional,
+                hf_token=hf_token,
+                subtitle_languages=subtitle_languages,
+                cookies_txt=cookies_txt,
+            )
     elif audio_path:
         with open(audio_path, "rb") as f:
             audio_bytes = f.read()

@@ -88,6 +88,15 @@ modal serve src/app.py
 
 Authentication uses `Authorization: Bearer <key>`. Keys are stored in the Modal `api-auth` secret (`API_KEY` and `SLACK_BOT_API_KEY`).
 
+| Endpoint | What it does |
+|---|---|
+| `POST /api/transcribe/url` | Transcribe any yt-dlp-resolvable URL. `use_subtitles: true` reuses the site's captions when it has them and falls back to WhisperX. |
+| `POST /api/transcribe/rss` | Transcribe an episode from an RSS feed. |
+| `POST /api/subtitles` | Return the site's own captions — no GPU. Fails if the URL has none. |
+| `GET /api/probe?url=` | Title, duration, extractor and available caption languages, without downloading. |
+| `GET /api/status/{job_id}` | Poll a job. |
+| `GET /api/result/{job_id}` | Fetch a completed transcript. |
+
 ## Scripts
 
 ### Download
@@ -103,8 +112,9 @@ python scripts/local/download_podcast.py
 **`scripts/modal/transcribe_modal.py`** — Cloud transcription via Modal GPU (no local GPU required)
 
 ```bash
-# From a URL
+# From a URL — a direct audio file, or any page yt-dlp can resolve
 modal run scripts/modal/transcribe_modal.py --audio-url "https://example.com/podcast.mp3"
+modal run scripts/modal/transcribe_modal.py --audio-url "https://youtube.com/watch?v=..."
 
 # From an RSS feed (latest episode)
 modal run scripts/modal/transcribe_modal.py --rss-url "https://example.com/feed.xml"
@@ -117,6 +127,39 @@ modal run scripts/modal/transcribe_modal.py --audio-url "..." --language zh --to
 
 # Deploy as standalone API endpoint
 modal deploy scripts/modal/transcribe_modal.py
+```
+
+### Media sources and existing transcripts
+
+`--audio-url` and `POST /api/transcribe/url` accept anything [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+supports — roughly 1,800 sites (YouTube, Vimeo, SoundCloud, Twitch, Bandcamp, Twitter/X, most news
+pages with an embedded player) plus a generic extractor. A URL that already points at an audio file
+is streamed directly; everything else goes through yt-dlp, which pulls just the audio stream and
+transcodes it to mp3 so a video URL never ships a whole video file to the GPU.
+
+Many of those sites publish their own captions, which can be reused instead of running WhisperX:
+
+```bash
+# What does this URL offer?
+modal run scripts/modal/transcribe_modal.py --audio-url "..." --list-subs
+
+# Use the site's captions instead of transcribing (no GPU, seconds not minutes)
+modal run scripts/modal/transcribe_modal.py --audio-url "..." --subtitles --subtitle-langs en
+```
+
+Human-authored subtitles are always preferred over auto-generated ones. YouTube's `json3` format
+carries per-word offsets, so auto-captions come back with word-level timings the transcript player
+can sync against; manual subtitles are line-level only. Auto-captions are cheap but noticeably
+worse than WhisperX — no reliable punctuation, no speaker labels, and no per-language handling for
+bilingual audio — so they are opt-in rather than the default.
+
+**Cookies.** Sites that bot-check datacenter IPs (YouTube in particular) can reject requests coming
+from Modal. Export your browser cookies in Netscape format and either pass `--cookies cookies.txt`
+locally, or make them available to the deployed functions as `YTDLP_COOKIES`:
+
+```bash
+modal secret create ytdlp-cookies YTDLP_COOKIES="$(cat cookies.txt)"
+# then add secrets=[modal.Secret.from_name("ytdlp-cookies")] to the functions that need it
 ```
 
 **`scripts/local/transcribe_local.py`** — Transcribe locally using WhisperX (requires WhisperX env)

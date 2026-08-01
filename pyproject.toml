@@ -9,6 +9,7 @@ dependencies = [
     "opencc-python-reimplemented>=0.1.7",
     "python-multipart>=0.0.22",
     "requests>=2.28.0",
+    "yt-dlp>=2025.1.15",
 ]
 
 [dependency-groups]
