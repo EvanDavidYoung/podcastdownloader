@@ -291,12 +291,38 @@
             border-bottom: 1px solid #3a3a5a;
         }
 
+        .lang-badge {
+            display: inline-block;
+            padding: 1px 7px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 600;
+            margin-left: 6px;
+            background: #3a3a5a;
+            color: #a0a0c0;
+            letter-spacing: 0.5px;
+        }
+
         .speaker-legend-item {
             display: flex;
             align-items: center;
             gap: 6px;
             font-size: 13px;
             font-weight: 600;
+            cursor: pointer;
+            user-select: none;
+            padding: 3px 8px;
+            border-radius: 12px;
+            transition: opacity 0.15s ease, background 0.15s ease;
+        }
+
+        .speaker-legend-item:hover {
+            background: #2a2a45;
+        }
+
+        .speaker-legend-item.muted {
+            opacity: 0.35;
+            text-decoration: line-through;
         }
 
         .speaker-legend-dot {
@@ -396,6 +422,7 @@
         // Speaker diarization colors
         const SPEAKER_COLORS = ['#6c63ff','#ff6b6b','#48c774','#ffdd57','#3273dc','#ff8c00','#ff69b4','#00d1b2'];
         let speakerColors = {};
+        const hiddenSpeakers = new Set();
 
         function buildSpeakerColors(segments) {
             const speakers = [...new Set(segments.map(s => s.speaker).filter(Boolean))].sort();
@@ -404,6 +431,28 @@
                 speakerColors[speaker] = SPEAKER_COLORS[i % SPEAKER_COLORS.length];
             });
             return speakers.length > 0;
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str == null ? '' : String(str);
+            return div.innerHTML;
+        }
+
+        // CJK ideographs plus CJK/fullwidth punctuation.
+        const CJK_RE = /[　-〿㐀-䶿一-鿿豈-﫿＀-￯]/;
+
+        // Word tokens carry no whitespace of their own: Chinese chars must butt up
+        // against each other, but English tokens ("In", "fact,") need a space or the
+        // transcript renders as "Infact,this".
+        function needsSpace(prevWord, nextWord) {
+            if (!prevWord || !nextWord) return false;
+            const prev = prevWord.trim();
+            const next = nextWord.trim();
+            if (!prev || !next) return false;
+            const prevIsCjk = CJK_RE.test(prev[prev.length - 1]);
+            const nextIsCjk = CJK_RE.test(next[0]);
+            return !(prevIsCjk && nextIsCjk);
         }
 
         // DOM elements
@@ -506,16 +555,29 @@
             allWords = [];
             const hasDiarization = buildSpeakerColors(transcriptData.segments);
 
-            // Show/hide speaker legend
+            // Show/hide speaker legend. Each entry toggles that speaker in and out,
+            // so a combined transcript can be read one speaker at a time.
             const legendEl = document.getElementById('speakerLegend');
             if (hasDiarization) {
                 legendEl.innerHTML = Object.entries(speakerColors).map(([speaker, color]) =>
-                    `<div class="speaker-legend-item">
+                    `<div class="speaker-legend-item ${hiddenSpeakers.has(speaker) ? 'muted' : ''}"
+                          data-speaker="${escapeHtml(speaker)}" title="Click to show/hide this speaker">
                         <div class="speaker-legend-dot" style="background:${color}"></div>
-                        <span style="color:${color}">${speaker}</span>
+                        <span style="color:${color}">${escapeHtml(speaker)}</span>
                     </div>`
                 ).join('');
                 legendEl.style.display = 'flex';
+                legendEl.querySelectorAll('.speaker-legend-item').forEach(el => {
+                    el.addEventListener('click', () => {
+                        const speaker = el.dataset.speaker;
+                        if (hiddenSpeakers.has(speaker)) {
+                            hiddenSpeakers.delete(speaker);
+                        } else {
+                            hiddenSpeakers.add(speaker);
+                        }
+                        renderTranscript();
+                    });
+                });
             } else {
                 legendEl.style.display = 'none';
             }
@@ -523,12 +585,17 @@
             let html = '';
 
             transcriptData.segments.forEach((segment, segIdx) => {
+                if (segment.speaker && hiddenSpeakers.has(segment.speaker)) return;
+
                 const color = segment.speaker ? speakerColors[segment.speaker] : null;
                 const borderStyle = color ? `style="border-left-color:${color}"` : '';
                 html += `<div class="segment" ${borderStyle}>`;
                 let timeHtml = `${formatTime(segment.start)} - ${formatTime(segment.end)}`;
                 if (color) {
-                    timeHtml += ` <span class="speaker-badge" style="background:${color}22;color:${color};border:1px solid ${color}55">${segment.speaker}</span>`;
+                    timeHtml += ` <span class="speaker-badge" style="background:${color}22;color:${color};border:1px solid ${color}55">${escapeHtml(segment.speaker)}</span>`;
+                }
+                if (segment.language) {
+                    timeHtml += ` <span class="lang-badge">${escapeHtml(segment.language)}</span>`;
                 }
                 html += `<div class="segment-time">${timeHtml}</div>`;
                 html += `<div class="segment-text">`;
@@ -537,11 +604,16 @@
                     segment.words.forEach((word, wordIdx) => {
                         const globalIdx = allWords.length;
                         allWords.push(word);
-                        const lowConf = word.score < 0.5 ? 'low-confidence' : '';
-                        html += `<span class="word ${lowConf}" data-idx="${globalIdx}" data-start="${word.start}" data-end="${word.end}">${word.word}</span>`;
+                        const lowConf = (word.score != null && word.score < 0.5) ? 'low-confidence' : '';
+                        // Separator sits outside the span so it is never highlighted
+                        // or clickable.
+                        if (wordIdx > 0 && needsSpace(segment.words[wordIdx - 1].word, word.word)) {
+                            html += ' ';
+                        }
+                        html += `<span class="word ${lowConf}" data-idx="${globalIdx}" data-start="${word.start}" data-end="${word.end}">${escapeHtml(word.word)}</span>`;
                     });
                 } else {
-                    html += segment.text;
+                    html += escapeHtml(segment.text);
                 }
 
                 html += `</div></div>`;
@@ -617,6 +689,7 @@
             let currentWord = null;
             for (let i = 0; i < allWords.length; i++) {
                 const word = allWords[i];
+                if (word.start == null || word.end == null) continue;
                 if (currentTime >= word.start && currentTime <= word.end) {
                     currentWord = word;
                     const el = document.querySelector(`.word[data-idx="${i}"]`);
@@ -631,7 +704,7 @@
 
             // Update current word display
             if (currentWord) {
-                currentWordDisplay.innerHTML = `<span style="font-size: 32px;">${currentWord.word}</span>`;
+                currentWordDisplay.innerHTML = `<span style="font-size: 32px;">${escapeHtml(currentWord.word)}</span>`;
             }
         });
 

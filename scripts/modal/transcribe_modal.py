@@ -271,6 +271,77 @@ def merge_speech_intervals(speech_intervals: list, merge_silence_max: float = 1.
     return merged
 
 
+def merge_speaker_turns(rows: list, merge_gap: float = 0.5, min_turn: float = 0.4) -> list:
+    """Collapse raw diarization rows into contiguous speaker turns.
+
+    Diarization emits many short rows per speaker; transcribing each one separately
+    would cut mid-sentence. Consecutive rows from the same speaker separated by less
+    than merge_gap are bridged, and turns shorter than min_turn are dropped as noise.
+
+    Args:
+        rows: iterable of dicts with "start", "end", "speaker"
+        merge_gap: max silence (seconds) to bridge between same-speaker rows
+        min_turn: drop turns shorter than this (seconds)
+
+    Returns:
+        list of {"start", "end", "speaker"} sorted by start
+    """
+    ordered = sorted(
+        ({"start": float(r["start"]), "end": float(r["end"]), "speaker": r["speaker"]} for r in rows),
+        key=lambda r: (r["start"], r["end"]),
+    )
+    if not ordered:
+        return []
+
+    merged = [ordered[0]]
+    for row in ordered[1:]:
+        cur = merged[-1]
+        if row["speaker"] == cur["speaker"] and row["start"] - cur["end"] <= merge_gap:
+            cur["end"] = max(cur["end"], row["end"])
+        else:
+            merged.append(row)
+
+    return [t for t in merged if t["end"] - t["start"] >= min_turn]
+
+
+def normalize_word_timings(segment: dict, anomaly_factor: float = 3.0) -> dict:
+    """Repair segments where forced alignment dumps a multi-second span on one word.
+
+    WhisperX's Chinese char-level alignment periodically assigns the whole leading
+    silence of a segment to its first character (e.g. 请 spanning 0.258-6.479s while
+    every following char spans ~0.02s), which makes word-by-word playback highlighting
+    useless. When the first word's duration exceeds anomaly_factor x the median word
+    duration, redistribute the segment's word timings proportionally by character
+    count across the segment span.
+
+    Mutates and returns the segment.
+    """
+    words = [w for w in segment.get("words", []) if w.get("start") is not None and w.get("end") is not None]
+    if len(words) < 3:
+        return segment
+
+    durations = sorted(w["end"] - w["start"] for w in words)
+    median = durations[len(durations) // 2]
+    first = words[0]["end"] - words[0]["start"]
+    if median <= 0 or first <= median * anomaly_factor:
+        return segment
+
+    span_start, span_end = segment["start"], segment["end"]
+    total_chars = sum(max(len(w["word"]), 1) for w in words)
+    span = span_end - span_start
+    if total_chars == 0 or span <= 0:
+        return segment
+
+    cursor = span_start
+    for w in words:
+        share = span * (max(len(w["word"]), 1) / total_chars)
+        w["start"] = round(cursor, 3)
+        w["end"] = round(cursor + share, 3)
+        cursor += share
+
+    return segment
+
+
 def detect_speech_chunks(
     audio_path: str, noise_db: int = -30, min_silence: float = 0.5,
     merge_silence_max: float = 1.2, max_chunk_sec: float = 25.0,
@@ -397,6 +468,271 @@ def transcribe_bilingual_audio(
                     ]
 
         return {"segments": segments}
+
+    finally:
+        os.unlink(audio_path)
+
+
+@app.function(
+    gpu="T4",
+    timeout=1800,
+    volumes={MODEL_CACHE_PATH: model_cache},
+    secrets=[modal.Secret.from_name("huggingface", required_keys=["HF_TOKEN"])],
+)
+def transcribe_diarized_bilingual(
+    audio_bytes: bytes,
+    filename: str = "audio.mp3",
+    hf_token: str = None,
+    num_speakers: int = None,
+    align: bool = True,
+    merge_words: bool = True,
+    to_traditional: bool = True,
+    speaker_languages: dict = None,
+    fix_alignment: bool = True,
+) -> dict:
+    """
+    Transcribe a two-language recording by speaker, one language locked per speaker.
+
+    Where transcribe_bilingual_audio() infers who is talking from the language it
+    detects per chunk, this runs three passes:
+
+      1. Diarize the whole file to find who speaks when.
+      2. For each speaker, detect their language once from their longest turns
+         (long slices; whisper's language detection is unreliable under 30s).
+      3. Transcribe each speaker's turns with that language forced, so neither
+         pass fights language detection and neither hears the other speaker.
+
+    Args:
+        audio_bytes: Raw audio file bytes
+        filename: Original filename (for suffix detection)
+        hf_token: HuggingFace token for diarization (falls back to HF_TOKEN secret)
+        num_speakers: Pin the speaker count when known (sets min and max)
+        align: Produce word-level timestamps via forced alignment
+        merge_words: Merge Chinese characters into words with jieba (zh/ja speakers)
+        to_traditional: Convert simplified to traditional Chinese (zh speakers)
+        speaker_languages: Skip detection, e.g. {"SPEAKER_00": "en", "SPEAKER_01": "zh"}
+        fix_alignment: Repair anomalous first-word spans (see normalize_word_timings)
+
+    Returns:
+        dict with "speakers" (pass 1 + detected language), "per_speaker" (one
+        player-schema transcript per speaker) and "combined" (all speakers merged,
+        sorted by start time).
+    """
+    import tempfile
+    import os
+    from collections import Counter
+
+    import torch
+
+    # Workaround for PyTorch 2.6+ weights_only issue with pyannote/omegaconf
+    _original_torch_load = torch.load
+    def _patched_torch_load(*args, **kwargs):
+        kwargs['weights_only'] = False
+        return _original_torch_load(*args, **kwargs)
+    torch.load = _patched_torch_load
+
+    import whisperx
+    from whisperx.audio import SAMPLE_RATE
+
+    os.environ["HF_HOME"] = MODEL_CACHE_PATH
+    os.environ["TORCH_HOME"] = MODEL_CACHE_PATH
+
+    if hf_token is None:
+        hf_token = os.environ.get("HF_TOKEN")
+    if not hf_token:
+        raise RuntimeError("Speaker diarization requires an HF token (HF_TOKEN secret or hf_token arg)")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    compute_type = "float16" if device == "cuda" else "int8"
+    print(f"Using device: {device}, compute_type: {compute_type}")
+
+    with tempfile.NamedTemporaryFile(suffix=os.path.splitext(filename)[1], delete=False) as f:
+        f.write(audio_bytes)
+        audio_path = f.name
+
+    def slice_audio(audio, start, end):
+        return audio[int(start * SAMPLE_RATE):int(end * SAMPLE_RATE)]
+
+    try:
+        audio = whisperx.load_audio(audio_path)
+
+        # --- Pass 1: who speaks when -------------------------------------------------
+        print("Pass 1: speaker diarization...")
+        from whisperx.diarize import DiarizationPipeline
+
+        diarize_model = DiarizationPipeline(use_auth_token=hf_token, device=device)
+        diarize_kwargs = {}
+        if num_speakers:
+            diarize_kwargs = {"min_speakers": num_speakers, "max_speakers": num_speakers}
+        diarize_segments = diarize_model(audio, **diarize_kwargs)
+
+        rows = diarize_segments.to_dict("records")
+        turns = merge_speaker_turns(rows)
+        if not turns:
+            raise RuntimeError("Diarization produced no usable speaker turns")
+
+        turns_by_speaker = {}
+        for turn in turns:
+            turns_by_speaker.setdefault(turn["speaker"], []).append(turn)
+
+        for speaker, spk_turns in sorted(turns_by_speaker.items()):
+            total = sum(t["end"] - t["start"] for t in spk_turns)
+            print(f"  {speaker}: {len(spk_turns)} turns, {total:.1f}s of speech")
+
+        # --- Pass 2a: one language per speaker ---------------------------------------
+        speaker_languages = dict(speaker_languages or {})
+        lang_votes = {}
+
+        undetected = [s for s in turns_by_speaker if s not in speaker_languages]
+        if undetected:
+            print("Pass 2a: detecting language per speaker...")
+            detect_model = whisperx.load_model(
+                "large-v3", device, compute_type=compute_type, language=None, vad_method="silero"
+            )
+            for speaker in undetected:
+                # Longest turns first -- short slices give unreliable language detection.
+                sampled, budget = [], 60.0
+                for turn in sorted(turns_by_speaker[speaker], key=lambda t: t["end"] - t["start"], reverse=True):
+                    if budget <= 0:
+                        break
+                    sampled.append(turn)
+                    budget -= turn["end"] - turn["start"]
+
+                votes = Counter()
+                for turn in sampled:
+                    result = detect_model.transcribe(
+                        slice_audio(audio, turn["start"], turn["end"]), batch_size=16, language=None
+                    )
+                    votes[result["language"]] += 1
+
+                lang_votes[speaker] = dict(votes)
+                speaker_languages[speaker] = votes.most_common(1)[0][0]
+                print(f"  {speaker}: {speaker_languages[speaker]} (votes: {dict(votes)})")
+
+            del detect_model
+
+        # --- Pass 2b/3: transcribe each speaker with their language locked -----------
+        print("Pass 2b/3: transcribing each speaker with language locked...")
+        models = {}  # language -> model, so en + zh costs two loads not one per speaker
+        per_speaker_segments = {}
+
+        for speaker in sorted(turns_by_speaker):
+            lang = speaker_languages[speaker]
+            if lang not in models:
+                models[lang] = whisperx.load_model(
+                    "large-v3", device, compute_type=compute_type, language=lang, vad_method="silero"
+                )
+            model = models[lang]
+
+            segments = []
+            spk_turns = turns_by_speaker[speaker]
+            for i, turn in enumerate(spk_turns):
+                result = model.transcribe(
+                    slice_audio(audio, turn["start"], turn["end"]), batch_size=16, language=lang
+                )
+                for seg in result["segments"]:
+                    text = seg["text"].strip()
+                    if not text:
+                        continue
+                    segments.append({
+                        "start": round(turn["start"] + seg["start"], 3),
+                        "end": round(turn["start"] + seg["end"], 3),
+                        "text": text,
+                        "speaker": speaker,
+                        "language": lang,
+                    })
+                print(f"  [{speaker} {i+1}/{len(spk_turns)}] {turn['start']:.1f}-{turn['end']:.1f}s")
+
+            per_speaker_segments[speaker] = segments
+
+        # --- Word-level alignment ----------------------------------------------------
+        if align:
+            print("Aligning for word-level timestamps...")
+            align_models = {}  # language -> (model, metadata)
+            for speaker in sorted(per_speaker_segments):
+                lang = speaker_languages[speaker]
+                if lang not in align_models:
+                    try:
+                        align_models[lang] = whisperx.load_align_model(language_code=lang, device=device)
+                    except Exception as e:
+                        print(f"No align model for '{lang}', skipping word timestamps for it: {e}")
+                        align_models[lang] = None
+                if align_models[lang] is None:
+                    continue
+
+                model_a, metadata = align_models[lang]
+                # Align against each turn's own slice so the aligner never sees the
+                # other speaker, then shift word times back to the global timeline.
+                for turn in turns_by_speaker[speaker]:
+                    in_turn = [s for s in per_speaker_segments[speaker]
+                               if turn["start"] <= s["start"] < turn["end"]]
+                    if not in_turn:
+                        continue
+                    local = [{"start": s["start"] - turn["start"],
+                              "end": s["end"] - turn["start"],
+                              "text": s["text"]} for s in in_turn]
+                    try:
+                        aligned = whisperx.align(
+                            local, model_a, metadata,
+                            slice_audio(audio, turn["start"], turn["end"]),
+                            device, return_char_alignments=False,
+                        )
+                    except Exception as e:
+                        print(f"  align failed for {speaker} turn {turn['start']:.1f}s: {e}")
+                        continue
+                    for orig, aligned_seg in zip(in_turn, aligned["segments"]):
+                        orig["words"] = [
+                            {
+                                "word": w["word"],
+                                "start": round(turn["start"] + w["start"], 3) if w.get("start") is not None else None,
+                                "end": round(turn["start"] + w["end"], 3) if w.get("end") is not None else None,
+                                "score": w.get("score"),
+                            }
+                            for w in aligned_seg.get("words", [])
+                        ]
+                        if fix_alignment:
+                            normalize_word_timings(orig)
+
+        # --- Per-speaker post-processing and packaging -------------------------------
+        per_speaker = {}
+        for speaker, segments in per_speaker_segments.items():
+            lang = speaker_languages[speaker]
+            transcript = {"segments": segments, "language": lang, "speaker": speaker}
+            if merge_words and lang in ["zh", "ja"]:
+                print(f"Merging words with jieba for {speaker}...")
+                transcript = merge_chinese_words(transcript)
+            if to_traditional and lang == "zh":
+                print(f"Converting {speaker} to traditional Chinese...")
+                transcript = convert_to_traditional(transcript)
+            # Built last so the flat list mirrors the post-processed segment words
+            # instead of aliasing dicts that jieba/OpenCC would then touch twice.
+            transcript["word_segments"] = [w for s in transcript["segments"] for w in s.get("words", [])]
+            per_speaker[speaker] = transcript
+
+        combined_segments = sorted(
+            (seg for t in per_speaker.values() for seg in t["segments"]),
+            key=lambda s: (s["start"], s["end"]),
+        )
+        detected = {speaker_languages[s] for s in per_speaker}
+        combined = {
+            "segments": combined_segments,
+            "word_segments": [w for s in combined_segments for w in s.get("words", [])],
+            "language": detected.pop() if len(detected) == 1 else "mixed",
+        }
+
+        speakers_meta = {
+            speaker: {
+                "language": speaker_languages[speaker],
+                "lang_votes": lang_votes.get(speaker, {}),
+                "total_speech": round(sum(t["end"] - t["start"] for t in spk_turns), 3),
+                "turn_count": len(spk_turns),
+                "segment_count": len(per_speaker[speaker]["segments"]),
+                "turns": [{"start": t["start"], "end": t["end"]} for t in spk_turns],
+            }
+            for speaker, spk_turns in sorted(turns_by_speaker.items())
+        }
+
+        return {"speakers": speakers_meta, "per_speaker": per_speaker, "combined": combined}
 
     finally:
         os.unlink(audio_path)
@@ -607,14 +943,66 @@ def main(
     hf_token: str = None,
     output: str = None,
     bilingual: bool = False,
+    diarized: bool = False,
+    num_speakers: int = None,
+    output_dir: str = None,
+    traditional: bool = True,
 ):
     """CLI entrypoint for running transcription.
 
     Pass --bilingual with --audio-path to auto-detect language per speech
     segment instead of forcing --language across the whole file (for
     recordings that alternate languages, e.g. a speaker + live interpreter).
+
+    Pass --diarized with --audio-path to identify speakers first and then
+    transcribe each speaker with their own language locked. Writes
+    speakers.json, one speaker_<ID>.json per speaker, and combined.json into
+    --output-dir; all three are playable in web/transcript-player.html.
+
+    --diarized uses --traditional (default on, disable with --no-traditional)
+    rather than --to-traditional: whisper emits a mix of simplified and
+    traditional characters within one file, so normalising the script is the
+    useful default here.
     """
     import json
+
+    if diarized:
+        if not audio_path:
+            print("--diarized requires --audio-path")
+            return
+        from pathlib import Path
+
+        with open(audio_path, "rb") as f:
+            audio_bytes = f.read()
+        result = transcribe_diarized_bilingual.remote(
+            audio_bytes=audio_bytes,
+            filename=audio_path,
+            hf_token=hf_token,
+            num_speakers=num_speakers,
+            merge_words=merge_words,
+            to_traditional=traditional,
+        )
+
+        out_dir = Path(output_dir or "diarized_output")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        def _write(name, payload):
+            path = out_dir / name
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            return path
+
+        print(f"\nSaved to {out_dir}/")
+        print(f"  {_write('speakers.json', result['speakers']).name}")
+        for speaker, transcript in result["per_speaker"].items():
+            path = _write(f"speaker_{speaker}.json", transcript)
+            meta = result["speakers"][speaker]
+            print(f"  {path.name} — {meta['language']}, {meta['segment_count']} segments, "
+                  f"{meta['total_speech']:.1f}s speech")
+        combined = result["combined"]
+        _write("combined.json", combined)
+        print(f"  combined.json — {len(combined['segments'])} segments ({combined['language']})")
+        return
 
     if bilingual:
         if not audio_path:
