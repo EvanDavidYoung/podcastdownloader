@@ -538,6 +538,7 @@ class TestTranscribeRSSEndpoint:
         fn.spawn.assert_called_once_with(
             rss_url="https://example.com/feed.xml",
             episode_index=5,
+            episode_title=None,
             language="zh",
             merge_words=True,
             to_traditional=False,
@@ -836,31 +837,26 @@ class TestOpenAITranscribeEndpoint:
 
 
 class TestPlayerJobsEndpoint:
-    """GET /api/player/jobs — list jobs from persistent volume (no auth)."""
+    """GET /api/player/jobs — list jobs from persistent volume (auth required)."""
 
-    def test_returns_empty_list_when_jobs_dir_missing(self):
+    def test_returns_empty_list_when_jobs_dir_missing(self, client):
         """Returns an empty list when the /jobs directory doesn't exist."""
         with patch("app.jobs_volume"):
             with patch("app.Path") as mock_path_cls:
                 mock_jobs_dir = Mock()
                 mock_jobs_dir.exists.return_value = False
                 mock_path_cls.return_value = mock_jobs_dir
-                resp = TestClient(web_app).get("/api/player/jobs")
+                resp = client.get("/api/player/jobs", headers=AUTH)
         assert resp.status_code == 200
         assert resp.json() == {"jobs": []}
 
-    def test_no_auth_required(self):
-        """Player listing endpoint is public (no Authorization header needed)."""
+    def test_auth_required(self, client):
+        """Player job listing rejects requests without an Authorization header."""
         with patch("app.jobs_volume"):
-            with patch("app.Path") as mock_path_cls:
-                mock_jobs_dir = Mock()
-                mock_jobs_dir.exists.return_value = False
-                mock_path_cls.return_value = mock_jobs_dir
-                resp = TestClient(web_app).get("/api/player/jobs")
-        # 200 (not 403/401) confirms no auth requirement
-        assert resp.status_code == 200
+            resp = client.get("/api/player/jobs")
+        assert resp.status_code in (401, 403)
 
-    def test_returns_sorted_jobs_from_volume(self, tmp_path):
+    def test_returns_sorted_jobs_from_volume(self, client, tmp_path):
         """Returns jobs from metadata.json files, sorted newest first."""
         job1_dir = tmp_path / "job-1"
         job1_dir.mkdir()
@@ -874,7 +870,7 @@ class TestPlayerJobsEndpoint:
 
         with patch("app.jobs_volume"):
             with patch("app.Path", return_value=tmp_path):
-                resp = TestClient(web_app).get("/api/player/jobs")
+                resp = client.get("/api/player/jobs", headers=AUTH)
 
         assert resp.status_code == 200
         jobs_list = resp.json()["jobs"]
@@ -1037,7 +1033,7 @@ class TestWatchAndCallback:
         assert url == "https://hook.example.com/done"
         assert payload["job_id"] == job_id
         assert payload["status"] == "completed"
-        assert payload["result"] == result
+        assert payload["transcript"] == result
 
     @pytest.mark.asyncio
     async def test_posts_error_payload_on_failure(self):
