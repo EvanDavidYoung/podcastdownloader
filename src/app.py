@@ -109,6 +109,18 @@ class TranscribeURLRequest(BaseModel):
     merge_words: bool = True
     to_traditional: bool = False
     callback_url: Optional[str] = None
+    # Reuse the source site's own captions when it has them, falling back to
+    # WhisperX. Use /api/subtitles instead when captions are the only thing you
+    # want — this path still occupies a GPU container.
+    use_subtitles: bool = False
+    subtitle_languages: Optional[list[str]] = None
+
+
+class SubtitleRequest(BaseModel):
+    url: str
+    languages: Optional[list[str]] = None
+    allow_auto: bool = True
+    callback_url: Optional[str] = None
 
 
 class TranscribeRSSRequest(BaseModel):
@@ -195,10 +207,12 @@ async def transcribe_from_url(
     api_key: str = Depends(verify_api_key),
 ):
     """
-    Start transcription from a direct audio URL.
+    Start transcription from any URL yt-dlp can resolve.
 
-    Returns a job_id to poll for status. If callback_url is provided, a POST
-    request will be sent to it when the job completes or fails.
+    Accepts a direct audio file, or a page with media on it (YouTube, Vimeo,
+    SoundCloud, Twitter, most news sites). Returns a job_id to poll for status.
+    If callback_url is provided, a POST request will be sent to it when the job
+    completes or fails.
     """
     cleanup_old_jobs()
 
@@ -215,6 +229,8 @@ async def transcribe_from_url(
         merge_words=req.merge_words,
         to_traditional=req.to_traditional,
         job_id=job_id,
+        use_subtitles=req.use_subtitles,
+        subtitle_languages=req.subtitle_languages,
     )
 
     jobs[job_id] = {
@@ -276,6 +292,62 @@ async def transcribe_from_rss(
         background_tasks.add_task(_watch_and_callback, job_id, call, req.callback_url)
 
     return JobResponse(job_id=job_id, status="running")
+
+
+@web_app.post("/api/subtitles", response_model=JobResponse)
+async def fetch_subtitles(
+    req: SubtitleRequest,
+    background_tasks: BackgroundTasks,
+    api_key: str = Depends(verify_api_key),
+):
+    """
+    Reuse the source site's existing transcript instead of transcribing it.
+
+    Much cheaper and faster than /api/transcribe/url (no GPU), but the text is
+    only as good as the site's captions — auto-generated ones lack punctuation
+    and speaker labels. Fails if the URL has no usable caption track; check
+    GET /api/probe first.
+    """
+    cleanup_old_jobs()
+
+    job_id = str(uuid.uuid4())
+    subtitles_fn = modal.Function.from_name("podcast-transcriber", "fetch_transcript")
+
+    call = subtitles_fn.spawn(
+        url=req.url,
+        languages=req.languages,
+        allow_auto=req.allow_auto,
+        job_id=job_id,
+    )
+
+    jobs[job_id] = {
+        "call": call,
+        "created_at": time.time(),
+        "status": "running",
+        "type": "subtitles",
+        "input": req.url,
+        "callback_url": req.callback_url,
+    }
+
+    if req.callback_url:
+        background_tasks.add_task(_watch_and_callback, job_id, call, req.callback_url)
+
+    return JobResponse(job_id=job_id, status="running")
+
+
+@web_app.get("/api/probe")
+async def probe_url(url: str, api_key: str = Depends(verify_api_key)):
+    """
+    Inspect a URL without downloading it.
+
+    Returns title, duration, extractor and the caption languages available,
+    so a caller can decide between /api/subtitles and /api/transcribe/url.
+    """
+    probe_fn = modal.Function.from_name("podcast-transcriber", "probe_url")
+    try:
+        return await probe_fn.remote.aio(url=url)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not resolve URL: {e}")
 
 
 @web_app.get("/api/status/{job_id}", response_model=StatusResponse)

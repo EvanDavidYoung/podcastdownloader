@@ -367,6 +367,8 @@ class TestTranscribeURLEndpoint:
             merge_words=False,
             to_traditional=True,
             job_id=ANY,
+            use_subtitles=False,
+            subtitle_languages=None,
         )
 
     def test_defaults_to_chinese_with_merge_words(self, client, mock_fn):
@@ -383,7 +385,123 @@ class TestTranscribeURLEndpoint:
             merge_words=True,
             to_traditional=False,
             job_id=ANY,
+            use_subtitles=False,
+            subtitle_languages=None,
         )
+
+
+class TestSubtitlesEndpoint:
+    """POST /api/subtitles — reuse the source site's captions instead of transcribing."""
+
+    def test_returns_job_id_with_running_status(self, client, mock_fn):
+        resp = client.post(
+            "/api/subtitles",
+            json={"url": "https://youtube.com/watch?v=abc123"},
+            headers=AUTH,
+        )
+        assert resp.status_code == 200
+        assert uuid.UUID(resp.json()["job_id"])  # valid UUID
+        assert resp.json()["status"] == "running"
+
+    def test_job_stored_with_subtitles_type(self, client, mock_fn):
+        resp = client.post(
+            "/api/subtitles",
+            json={"url": "https://youtube.com/watch?v=abc123"},
+            headers=AUTH,
+        )
+        job_id = resp.json()["job_id"]
+        assert jobs[job_id]["type"] == "subtitles"
+        assert jobs[job_id]["input"] == "https://youtube.com/watch?v=abc123"
+
+    def test_spawns_the_cpu_only_transcript_function(self, client, mock_fn):
+        """Captions must not go through the GPU transcription function."""
+        client.post(
+            "/api/subtitles",
+            json={"url": "https://youtube.com/watch?v=abc123"},
+            headers=AUTH,
+        )
+        mock_modal.Function.from_name.assert_called_with(
+            "podcast-transcriber", "fetch_transcript"
+        )
+
+    def test_all_params_forwarded_to_modal(self, client, mock_fn):
+        fn, _ = mock_fn
+        client.post(
+            "/api/subtitles",
+            json={
+                "url": "https://youtube.com/watch?v=abc123",
+                "languages": ["en", "zh"],
+                "allow_auto": False,
+            },
+            headers=AUTH,
+        )
+        fn.spawn.assert_called_once_with(
+            url="https://youtube.com/watch?v=abc123",
+            languages=["en", "zh"],
+            allow_auto=False,
+            job_id=ANY,
+        )
+
+    def test_defaults_accept_auto_captions_in_any_language(self, client, mock_fn):
+        fn, _ = mock_fn
+        client.post("/api/subtitles", json={"url": "https://x.com/v"}, headers=AUTH)
+        fn.spawn.assert_called_once_with(
+            url="https://x.com/v", languages=None, allow_auto=True, job_id=ANY
+        )
+
+    def test_rejects_wrong_key(self, client, mock_fn):
+        resp = client.post(
+            "/api/subtitles",
+            json={"url": "https://x.com/v"},
+            headers={"Authorization": "Bearer wrong"},
+        )
+        assert resp.status_code == 401
+
+
+class TestProbeEndpoint:
+    """GET /api/probe — inspect a URL without downloading it."""
+
+    @pytest.fixture
+    def mock_probe_fn(self):
+        fn = Mock()
+        fn.remote.aio = AsyncMock(
+            return_value={
+                "title": "Some Talk",
+                "extractor": "Youtube",
+                "duration": 812,
+                "language": "en",
+                "webpage_url": "https://youtube.com/watch?v=abc123",
+                "subtitles": ["en"],
+                "automatic_captions": ["en", "zh-Hans"],
+            }
+        )
+        original = mock_modal.Function.from_name.return_value
+        mock_modal.Function.from_name.return_value = fn
+        yield fn
+        mock_modal.Function.from_name.return_value = original
+
+    def test_returns_available_caption_languages(self, client, mock_probe_fn):
+        resp = client.get(
+            "/api/probe", params={"url": "https://youtube.com/watch?v=abc123"}, headers=AUTH
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["title"] == "Some Talk"
+        assert body["subtitles"] == ["en"]
+        assert body["automatic_captions"] == ["en", "zh-Hans"]
+        mock_probe_fn.remote.aio.assert_awaited_once_with(
+            url="https://youtube.com/watch?v=abc123"
+        )
+
+    def test_unresolvable_url_returns_400(self, client, mock_probe_fn):
+        mock_probe_fn.remote.aio.side_effect = Exception("Unsupported URL")
+        resp = client.get("/api/probe", params={"url": "https://example.com"}, headers=AUTH)
+        assert resp.status_code == 400
+        assert "Unsupported URL" in resp.json()["detail"]
+
+    def test_requires_auth(self, client, mock_probe_fn):
+        resp = client.get("/api/probe", params={"url": "https://x.com/v"})
+        assert resp.status_code == 401
 
 
 class TestTranscribeRSSEndpoint:
