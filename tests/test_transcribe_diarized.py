@@ -18,11 +18,42 @@ sys.modules["modal"] = mock_modal
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "modal"))
 
 from transcribe_modal import (  # noqa: E402
+    build_diarization_pipeline,
     convert_to_traditional,
     merge_chinese_words,
     merge_speaker_turns,
     normalize_word_timings,
 )
+
+
+class TestBuildDiarizationPipeline:
+    """build_diarization_pipeline picks the auth kwarg the installed whisperx accepts."""
+
+    def test_uses_token_kwarg_on_new_signature(self):
+        class NewPipeline:
+            def __init__(self, token=None, device=None):
+                self.kwargs = {"token": token, "device": device}
+
+        pipe = build_diarization_pipeline(NewPipeline, "hf_abc", "cuda")
+        assert pipe.kwargs == {"token": "hf_abc", "device": "cuda"}
+
+    def test_uses_use_auth_token_kwarg_on_old_signature(self):
+        class OldPipeline:
+            def __init__(self, use_auth_token=None, device=None):
+                self.kwargs = {"use_auth_token": use_auth_token, "device": device}
+
+        pipe = build_diarization_pipeline(OldPipeline, "hf_abc", "cpu")
+        assert pipe.kwargs == {"use_auth_token": "hf_abc", "device": "cpu"}
+
+    def test_prefers_token_when_both_accepted(self):
+        class BothPipeline:
+            def __init__(self, token=None, use_auth_token=None, device=None):
+                self.token = token
+                self.use_auth_token = use_auth_token
+
+        pipe = build_diarization_pipeline(BothPipeline, "hf_abc", "cpu")
+        assert pipe.token == "hf_abc"
+        assert pipe.use_auth_token is None
 
 
 class TestMergeSpeakerTurns:
