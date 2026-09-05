@@ -77,7 +77,11 @@ PyTorch 2.6 changed `torch.load()` to use `weights_only=True` by default, which 
 
 ### HuggingFace Hub API change
 
-Newer versions of `huggingface_hub` removed the `use_auth_token` parameter that pyannote-audio still uses. The script pins `huggingface_hub<0.25.0` to maintain compatibility.
+`huggingface_hub` was once pinned `<0.25.0` because older pyannote-audio passed it a `use_auth_token` parameter that newer releases had removed. That pin is gone: whisperx now requires `huggingface_hub>=0.28.1`, so keeping it made the image impossible to build. Current pyannote-audio (4.x) no longer needs it.
+
+### WhisperX diarization signature
+
+whisperx renamed `DiarizationPipeline`'s auth argument from `use_auth_token` to `token`. Because whisperx is installed from git main, `build_diarization_pipeline()` inspects the constructor and passes whichever name that build accepts, rather than breaking whenever upstream changes it.
 
 ### Modal API updates
 

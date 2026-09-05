@@ -39,7 +39,9 @@ image = (
         "torch",
         "torchaudio",
         "omegaconf",
-        "huggingface_hub<0.25.0",  # Pin to avoid use_auth_token deprecation error
+        # huggingface_hub was pinned <0.25.0 for an old pyannote incompatibility.
+        # whisperx now requires >=0.28.1, so the pin made the image unbuildable.
+        # Let whisperx and pyannote resolve it themselves.
         "whisperx @ git+https://github.com/m-bain/whisperx.git",
         "feedparser",
         "requests",
@@ -67,6 +69,21 @@ MODEL_CACHE_PATH = "/cache/models"
 # Persistent volume for completed job artifacts (transcript, audio, metadata)
 jobs_volume = modal.Volume.from_name("podcast-jobs", create_if_missing=True)
 JOBS_PATH = "/jobs"
+
+
+def build_diarization_pipeline(pipeline_cls, hf_token, device):
+    """Construct a whisperx DiarizationPipeline across signature versions.
+
+    whisperx is installed from git main, and it renamed the auth argument from
+    `use_auth_token` to `token`. Passing the wrong one raises TypeError at
+    construction and fails the whole job, so pick the name this build actually
+    accepts rather than pinning against a moving upstream.
+    """
+    import inspect
+
+    params = inspect.signature(pipeline_cls.__init__).parameters
+    key = "token" if "token" in params else "use_auth_token"
+    return pipeline_cls(**{key: hf_token}, device=device)
 
 
 @app.function(
@@ -143,19 +160,30 @@ def transcribe_audio(
         model_a, metadata = whisperx.load_align_model(language_code=language, device=device)
         result = whisperx.align(result["segments"], model_a, metadata, audio, device, return_char_alignments=False)
 
-        # Optional: Speaker diarization
+        # Optional: Speaker diarization.
+        # The transcript is already complete by this point, so a diarization
+        # failure must not discard it. pyannote's default model is a gated HF
+        # repo, and callers that only want text shouldn't be blocked on being
+        # granted access to it.
+        diarization_error = None
         if hf_token:
             print("Running speaker diarization...")
-            from whisperx.diarize import DiarizationPipeline, assign_word_speakers
-            diarize_model = DiarizationPipeline(use_auth_token=hf_token, device=device)
-            diarize_segments = diarize_model(audio)
-            result = assign_word_speakers(diarize_segments, result)
+            try:
+                from whisperx.diarize import DiarizationPipeline, assign_word_speakers
+                diarize_model = build_diarization_pipeline(DiarizationPipeline, hf_token, device)
+                diarize_segments = diarize_model(audio)
+                result = assign_word_speakers(diarize_segments, result)
+            except Exception as exc:
+                diarization_error = f"{type(exc).__name__}: {exc}"
+                print(f"Diarization failed, returning transcript without speakers: {diarization_error}")
 
         transcript = {
             "segments": result["segments"],
             "word_segments": result.get("word_segments", []),
             "language": language,
         }
+        if diarization_error:
+            transcript["diarization_error"] = diarization_error
 
         # Merge Chinese words if requested
         if merge_words and language in ["zh", "ja"]:
@@ -575,7 +603,7 @@ def transcribe_diarized_bilingual(
         print("Pass 1: speaker diarization...")
         from whisperx.diarize import DiarizationPipeline
 
-        diarize_model = DiarizationPipeline(use_auth_token=hf_token, device=device)
+        diarize_model = build_diarization_pipeline(DiarizationPipeline, hf_token, device)
         diarize_kwargs = {}
         if num_speakers:
             diarize_kwargs = {"min_speakers": num_speakers, "max_speakers": num_speakers}
